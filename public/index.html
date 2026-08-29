@@ -42,6 +42,23 @@
   .meta a{ display:inline-block; margin-top:8px; color:var(--accent); text-decoration:none; font-weight:600; }
   .empty{ color:var(--muted); text-align:center; padding:22px; }
   .grouptitle{ font-size:13px; color:var(--fg); margin:14px 0 8px; font-weight:600; }
+  .prodcard{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin:16px 0; }
+  .prodhead{ display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .prodhead .pt{ font-size:15px; font-weight:700; }
+  .prodhead .pp{ color:var(--ok); font-weight:600; font-size:14px; }
+  .prodhead .warn{ color:var(--warn); font-size:12px; }
+  details.orig{ margin:8px 0; } details.orig summary{ cursor:pointer; color:var(--muted); font-size:12px; }
+  details.orig .body{ color:var(--muted); font-size:12px; line-height:1.6; margin-top:6px; white-space:pre-wrap; }
+  .gentools{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 4px; }
+  .genwrap{ margin-top:8px; }
+  .genfield{ margin-top:10px; }
+  .genfield label{ font-size:12px; color:var(--muted); display:flex; justify-content:space-between; margin-bottom:4px; }
+  .genfield .charc{ color:var(--muted); }
+  .genfield textarea{ width:100%; font-family:inherit; font-size:13px; line-height:1.6; }
+  textarea.pr{ min-height:44px; } textarea.desc{ min-height:96px; }
+  .btnrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .mini{ padding:6px 11px; font-size:12px; border-radius:8px; }
+  .imgs-h{ font-size:12px; color:var(--muted); margin:12px 0 6px; }
   .spin{ display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:sp .8s linear infinite; vertical-align:-2px; margin-right:6px; }
   @keyframes sp{ to{ transform:rotate(360deg); } }
   footer{ color:var(--muted); font-size:12px; text-align:center; padding:20px 0 30px; }
@@ -51,7 +68,7 @@
 <body>
 <header>
   <h1>URL取得＋正方形化ツール</h1>
-  <div class="sub">商品ページのURLを入れると写真を取得。背景を拡張して継ぎ目なく正方形にしてダウンロードできます。</div>
+  <div class="sub">商品ページのURLを入れると写真・価格・説明を取得。背景を拡張して正方形化し、である調説明文＋PR文も自動生成します。</div>
 </header>
 <div class="wrap">
 
@@ -96,7 +113,8 @@
   <div class="urlbox">
     <textarea id="urls" placeholder="https://d1milano.com/products/aape-grey-camo-nylon&#10;https://d1milano.com/products/aape-red-camo-canva"></textarea>
     <div class="bar">
-      <button id="fetchBtn">写真を取得</button>
+      <button id="fetchBtn">写真・情報を取得</button>
+      <button class="ghost" id="genAllBtn" disabled>全商品のテキスト生成</button>
       <button class="ghost" id="selAll" disabled>全選択</button>
       <button class="ghost" id="selNone" disabled>全解除</button>
       <span class="count" id="srcCount"></span>
@@ -128,7 +146,7 @@ const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
 const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
-const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount');
+const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount'), genAllBtn=$('#genAllBtn');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
 const grid=$('#grid'), emptyMsg=$('#emptyMsg'), zipBtn=$('#zipBtn'), clearBtn=$('#clearBtn'), outCount=$('#outCount');
 
@@ -142,6 +160,7 @@ quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
 
 fetchBtn.onclick = doFetch;
+genAllBtn.onclick = genAll;
 selAll.onclick = ()=> setAll(true);
 selNone.onclick = ()=> setAll(false);
 squareBtn.onclick = squareSelected;
@@ -158,9 +177,9 @@ async function doFetch(){
     try{
       const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
       const d = await r.json();
-      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, images:[], error:d.error||'画像が見つかりませんでした'}); continue; }
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.price||'', description:d.description||'', images:[], gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
-      sources.push({ pageUrl, title:d.title||pageUrl, images:d.images.map(src=>({src, sel:true})) });
+      sources.push({ pageUrl, title:d.title||pageUrl, price:d.price||'', description:d.description||'', gen:null, images:d.images.map(src=>({src, sel:true})) });
     }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
   }
   fetchBtn.disabled=false;
@@ -170,30 +189,124 @@ async function doFetch(){
   renderSources();
 }
 
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
 function renderSources(){
   const total = sources.reduce((a,s)=>a+s.images.length,0);
   selAll.disabled=selNone.disabled = total===0;
+  genAllBtn.disabled = sources.length===0;
   squareBar.style.display = total? 'flex':'none';
   srcCount.textContent = total? `${total} 枚`:'';
   sourcesEl.innerHTML='';
   sources.forEach((s,si)=>{
-    const h=document.createElement('div');
-    const head=document.createElement('div'); head.className='grouptitle';
-    head.textContent = s.title + (s.error? `　⚠ ${s.error}`:` — ${s.images.length}枚`);
-    h.appendChild(head);
+    const card=document.createElement('div'); card.className='prodcard';
+
+    // 見出し: 商品名＋価格
+    const head=document.createElement('div'); head.className='prodhead';
+    head.innerHTML = `<span class="pt">${esc(s.title)}</span>`
+      + (s.price? `<span class="pp">${esc(s.price)}</span>`:'')
+      + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'');
+    card.appendChild(head);
+
+    // 公式説明（原文・折りたたみ）
+    if(s.description){
+      const det=document.createElement('details'); det.className='orig';
+      det.innerHTML=`<summary>公式説明（原文）</summary><div class="body">${esc(s.description)}</div>`;
+      card.appendChild(det);
+    }
+
+    // テキスト生成ツール
+    const tools=document.createElement('div'); tools.className='gentools';
+    const genBtn=document.createElement('button'); genBtn.className='mini';
+    genBtn.textContent = s.gen? 'テキスト再生成' : 'テキスト生成（である調＋PR）';
+    genBtn.onclick=()=>generateText(si, genBtn);
+    tools.appendChild(genBtn);
+    card.appendChild(tools);
+
+    if(s.gen){
+      const gw=document.createElement('div'); gw.className='genwrap';
+      gw.innerHTML=`
+        <div class="genfield">
+          <label>PR文 <span class="charc" data-for="pr">${s.gen.pr.length}字</span></label>
+          <textarea class="pr" data-si="${si}" data-k="pr">${esc(s.gen.pr)}</textarea>
+        </div>
+        <div class="genfield">
+          <label>説明文（である調） <span class="charc" data-for="desc">${s.gen.desc.length}字</span></label>
+          <textarea class="desc" data-si="${si}" data-k="desc">${esc(s.gen.desc)}</textarea>
+        </div>
+        <div class="btnrow">
+          <button class="ghost mini" data-copy="pr">PR文をコピー</button>
+          <button class="ghost mini" data-copy="desc">説明文をコピー</button>
+          <button class="ghost mini" data-copy="txt">product.txt形式でコピー</button>
+        </div>`;
+      gw.querySelectorAll('textarea').forEach(ta=>{
+        ta.oninput=()=>{ s.gen[ta.dataset.k]=ta.value; const c=gw.querySelector(`.charc[data-for="${ta.dataset.k}"]`); if(c) c.textContent=ta.value.length+'字'; };
+      });
+      gw.querySelectorAll('[data-copy]').forEach(btn=>{
+        btn.onclick=()=>copyProduct(s, btn.dataset.copy, btn);
+      });
+      card.appendChild(gw);
+    }
+
+    // 画像グリッド
     if(s.images.length){
+      const ih=document.createElement('div'); ih.className='imgs-h'; ih.textContent=`画像 ${s.images.length}枚（クリックで選択切替）`;
+      card.appendChild(ih);
       const g=document.createElement('div'); g.className='grid';
-      s.images.forEach((im,ii)=>{
+      s.images.forEach((im)=>{
         const c=document.createElement('div'); c.className='card'+(im.sel?' sel':'');
         c.innerHTML=`<div class="thumb"><span class="tick">✓</span><img loading="lazy" src="/api/img?src=${encodeURIComponent(im.src)}"></div>`;
         c.querySelector('.thumb').onclick=()=>{ im.sel=!im.sel; c.classList.toggle('sel', im.sel); updateSel(); };
         g.appendChild(c);
       });
-      h.appendChild(g);
+      card.appendChild(g);
     }
-    sourcesEl.appendChild(h);
+    sourcesEl.appendChild(card);
   });
   updateSel();
+}
+
+async function generateText(si, btn){
+  const s=sources[si];
+  const old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
+  try{
+    const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title:s.title, price:s.price, description:s.description})});
+    const d=await r.json();
+    if(d.error){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+d.error); return; }
+    s.gen={ desc:d.desc||'', pr:d.pr||'' };
+    renderSources();
+  }catch(e){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+e); }
+}
+
+async function genAll(){
+  genAllBtn.disabled=true; const old=genAllBtn.textContent;
+  let n=0; const targets=sources.filter(s=>s.title||s.description);
+  for(const s of targets){
+    genAllBtn.innerHTML=`<span class="spin"></span>生成中… ${++n}/${targets.length}`;
+    try{
+      const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({title:s.title, price:s.price, description:s.description})});
+      const d=await r.json(); if(!d.error) s.gen={ desc:d.desc||'', pr:d.pr||'' };
+    }catch(e){}
+  }
+  genAllBtn.textContent=old; genAllBtn.disabled=false; renderSources();
+}
+
+function productText(s){
+  const L=[];
+  L.push('【WordPress投稿タイトル】'); L.push(s.title||''); L.push('');
+  if(s.price){ L.push('【価格】'); L.push(s.price); L.push(''); }
+  if(s.gen){ L.push('【PR文（30字前後）】'); L.push(s.gen.pr||''); L.push('');
+    L.push('【商品説明（である調）】'); L.push(s.gen.desc||''); L.push(''); }
+  if(s.description){ L.push('【商品説明（公式原文）】'); L.push(s.description); L.push(''); }
+  L.push('【ショッピングURL】'); L.push(s.pageUrl||'');
+  return L.join('\n');
+}
+async function copyProduct(s, kind, btn){
+  const text = kind==='pr'? (s.gen&&s.gen.pr||'') : kind==='desc'? (s.gen&&s.gen.desc||'') : productText(s);
+  try{ await navigator.clipboard.writeText(text); const o=btn.textContent; btn.textContent='コピーしました ✓'; setTimeout(()=>btn.textContent=o,1200); }
+  catch(e){ alert('コピーできませんでした'); }
 }
 function setAll(v){ sources.forEach(s=>s.images.forEach(im=>im.sel=v)); renderSources(); }
 function updateSel(){
