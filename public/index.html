@@ -82,6 +82,10 @@
       <label>ファイル名</label>
       <select id="nameMode"><option value="product">商品名＋連番</option><option value="orig">元画像名</option></select>
     </div>
+    <div class="field">
+      <label>URL順の番号</label>
+      <select id="urlNum"><option value="off">付けない</option><option value="on">先頭に付ける（01_…）</option></select>
+    </div>
     <div class="field" id="qWrap">
       <label>JPEG品質 <span id="qVal">95</span></label>
       <div class="range"><input type="range" id="quality" min="60" max="100" value="95"></div>
@@ -122,7 +126,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
-const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode');
+const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -240,9 +244,14 @@ function baseName(src){ try{ const p=new URL(src).pathname.split('/').pop()||'im
 function slugifyTitle(t){ return (t||'image').replace(/[\/\\:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim() || 'image'; }
 
 async function squareSelected(){
-  // 選択画像を商品ごとに集め、商品内で連番を振る
-  const jobs=[];
-  sources.forEach(s=>{ let idx=0; s.images.forEach(im=>{ if(im.sel){ idx++; jobs.push({ src:im.src, title:s.title, idx }); } }); });
+  // 選択画像を商品ごとに集め、URL入力順に商品番号(productNo)、商品内で連番(idx)を振る
+  const jobs=[]; let productNo=0;
+  sources.forEach(s=>{
+    const selImgs=s.images.filter(im=>im.sel);
+    if(!selImgs.length) return;
+    productNo++;
+    selImgs.forEach((im,i)=> jobs.push({ src:im.src, title:s.title, idx:i+1, productNo }));
+  });
   if(!jobs.length) return;
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
   const seen={};
@@ -252,9 +261,10 @@ async function squareSelected(){
       const {canvas,size}=processImage(img);
       const blob=await exportBlob(canvas);
       const ext=fmt.value==='image/png'?'png':'jpg';
-      let base = nameMode.value==='orig'
+      const core = nameMode.value==='orig'
         ? baseName(job.src)
         : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
+      let base = urlNum.value==='on' ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
       if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
       items.push({ name:`${base}.${ext}`, base, srcImg:img, blob, url:URL.createObjectURL(blob), size });
     }catch(e){ /* skip broken */ }
