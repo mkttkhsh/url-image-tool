@@ -1,0 +1,13 @@
+{
+  "name": "url-image-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "商品ページURLから写真を取得し、背景を拡張して正方形化するツール（Cloudflare Worker）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.1"
+  }
+}

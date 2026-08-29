@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>URL取得＋正方形化ツール</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{ --bg:#0f1115; --panel:#1a1d24; --panel2:#232733; --line:#2c313d; --fg:#e7eaf0; --muted:#98a2b3; --accent:#6ea8fe; --accent2:#4f86f7; --ok:#31c48d; --warn:#f0a35e; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif; background:var(--bg); color:var(--fg); }
+  header{ padding:20px 24px 8px; }
+  h1{ font-size:20px; margin:0 0 4px; font-weight:700; }
+  h2{ font-size:14px; color:var(--muted); font-weight:600; margin:22px 0 10px; letter-spacing:.02em; }
+  .sub{ color:var(--muted); font-size:13px; }
+  .wrap{ padding:16px 24px 60px; max-width:1200px; margin:0 auto; }
+  .controls{ display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .field{ display:flex; flex-direction:column; gap:6px; }
+  .field label{ font-size:12px; color:var(--muted); }
+  select,input[type=number],textarea{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:9px; padding:9px 11px; font-size:14px; }
+  select{ min-width:130px; } input[type=number]{ width:110px; }
+  .range{ display:flex; align-items:center; gap:8px; } input[type=range]{ width:120px; }
+  textarea{ width:100%; min-height:74px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  .urlbox{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  button{ background:var(--accent2); color:#fff; border:0; border-radius:10px; padding:10px 16px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.ghost{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); }
+  button:disabled{ opacity:.4; cursor:not-allowed; }
+  .bar{ display:flex; gap:10px; flex-wrap:wrap; margin:12px 0; align-items:center; }
+  .count{ color:var(--muted); font-size:13px; margin-left:auto; }
+  .msg{ font-size:13px; padding:8px 0; min-height:20px; }
+  .msg.err{ color:var(--warn); } .msg.ok{ color:var(--ok); }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative; }
+  .card.sel{ outline:2px solid var(--accent); outline-offset:-2px; }
+  .thumb{ background:#0b0d11 url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="%23151821"/><rect width="10" height="10" fill="%231b1f2a"/><rect x="10" y="10" width="10" height="10" fill="%231b1f2a"/></svg>'); background-size:20px 20px; aspect-ratio:1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  .thumb img{ width:100%; height:100%; object-fit:contain; display:block; }
+  .tick{ position:absolute; top:8px; left:8px; width:22px; height:22px; border-radius:6px; background:rgba(0,0,0,.55); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:13px; color:transparent; }
+  .card.sel .tick{ background:var(--accent2); color:#fff; border-color:var(--accent2); }
+  .meta{ padding:9px 11px; font-size:12px; }
+  .meta .name{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta .dim{ color:var(--muted); margin-top:2px; }
+  .meta a{ display:inline-block; margin-top:8px; color:var(--accent); text-decoration:none; font-weight:600; }
+  .empty{ color:var(--muted); text-align:center; padding:22px; }
+  .grouptitle{ font-size:13px; color:var(--fg); margin:14px 0 8px; font-weight:600; }
+  .spin{ display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:sp .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes sp{ to{ transform:rotate(360deg); } }
+  footer{ color:var(--muted); font-size:12px; text-align:center; padding:20px 0 30px; }
+  .divider{ height:1px; background:var(--line); margin:26px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>URL取得＋正方形化ツール</h1>
+  <div class="sub">商品ページのURLを入れると写真を取得。背景を拡張して継ぎ目なく正方形にしてダウンロードできます。</div>
+</header>
+<div class="wrap">
+
+  <div class="controls">
+    <div class="field">
+      <label>出力サイズ</label>
+      <select id="sizeMode">
+        <option value="long">長辺に合わせる（拡大なし）</option>
+        <option value="1080">1080 × 1080</option>
+        <option value="1200">1200 × 1200</option>
+        <option value="2000">2000 × 2000</option>
+        <option value="custom">カスタム…</option>
+      </select>
+    </div>
+    <div class="field" id="customWrap" style="display:none">
+      <label>カスタム (px)</label>
+      <input type="number" id="customSize" value="1500" min="100" max="8000" step="10">
+    </div>
+    <div class="field">
+      <label>背景</label>
+      <select id="bgMode"><option value="edge">端を引き延ばす（継ぎ目なし）</option><option value="white">白ベタ</option></select>
+    </div>
+    <div class="field">
+      <label>形式</label>
+      <select id="fmt"><option value="image/jpeg">JPEG</option><option value="image/png">PNG</option></select>
+    </div>
+    <div class="field" id="qWrap">
+      <label>JPEG品質 <span id="qVal">95</span></label>
+      <div class="range"><input type="range" id="quality" min="60" max="100" value="95"></div>
+    </div>
+  </div>
+
+  <h2>1. 商品ページのURL（複数OK・1行に1つ）</h2>
+  <div class="urlbox">
+    <textarea id="urls" placeholder="https://d1milano.com/products/aape-grey-camo-nylon&#10;https://d1milano.com/products/aape-red-camo-canva"></textarea>
+    <div class="bar">
+      <button id="fetchBtn">写真を取得</button>
+      <button class="ghost" id="selAll" disabled>全選択</button>
+      <button class="ghost" id="selNone" disabled>全解除</button>
+      <span class="count" id="srcCount"></span>
+    </div>
+    <div class="msg" id="fetchMsg"></div>
+  </div>
+
+  <div id="sources"></div>
+
+  <div class="bar" id="squareBar" style="display:none">
+    <button id="squareBtn">選択した画像を正方形化 →</button>
+    <span class="count" id="selCount"></span>
+  </div>
+
+  <div class="divider"></div>
+
+  <h2>2. 正方形化した画像</h2>
+  <div class="bar">
+    <button id="zipBtn" disabled>ZIPでまとめてダウンロード</button>
+    <button class="ghost" id="clearBtn" disabled>クリア</button>
+    <span class="count" id="outCount"></span>
+  </div>
+  <div class="grid" id="grid"><div class="empty" id="emptyMsg">まだありません。上でURLを取得し、画像を選んで「正方形化」してください。</div></div>
+</div>
+<footer>取得・加工はこのアプリ内で完結。© 246 image tool</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
+const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap');
+const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
+const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount');
+const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
+const grid=$('#grid'), emptyMsg=$('#emptyMsg'), zipBtn=$('#zipBtn'), clearBtn=$('#clearBtn'), outCount=$('#outCount');
+
+let sources = []; // { pageUrl, title, images:[{src, sel}] }
+let items = [];    // squared results {name, base, blob, url, size}
+
+sizeMode.onchange = ()=>{ customWrap.style.display = sizeMode.value==='custom'?'flex':'none'; reprocessAll(); };
+[customSize,bgMode].forEach(el=> el.onchange = reprocessAll);
+fmt.onchange = ()=>{ qWrap.style.opacity = fmt.value==='image/jpeg'?'1':'.4'; reprocessAll(); };
+quality.oninput = ()=> qVal.textContent = quality.value;
+quality.onchange = reprocessAll;
+
+fetchBtn.onclick = doFetch;
+selAll.onclick = ()=> setAll(true);
+selNone.onclick = ()=> setAll(false);
+squareBtn.onclick = squareSelected;
+zipBtn.onclick = downloadZip;
+clearBtn.onclick = ()=>{ items.forEach(it=>URL.revokeObjectURL(it.url)); items=[]; renderOut(); };
+
+async function doFetch(){
+  const list = urls.value.split(/\s+/).map(s=>s.trim()).filter(Boolean);
+  if(!list.length){ fetchMsg.className='msg err'; fetchMsg.textContent='URLを入力してください'; return; }
+  fetchBtn.disabled=true; fetchMsg.className='msg'; fetchMsg.innerHTML='<span class="spin"></span>取得中…';
+  sources=[];
+  let ok=0, ng=0;
+  for(const pageUrl of list){
+    try{
+      const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
+      const d = await r.json();
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, images:[], error:d.error||'画像が見つかりませんでした'}); continue; }
+      ok++;
+      sources.push({ pageUrl, title:d.title||pageUrl, images:d.images.map(src=>({src, sel:true})) });
+    }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
+  }
+  fetchBtn.disabled=false;
+  const total = sources.reduce((a,s)=>a+s.images.length,0);
+  fetchMsg.className = ng? 'msg err':'msg ok';
+  fetchMsg.textContent = `取得完了: ${ok}件成功 / ${ng}件失敗 ・ 画像 ${total}枚`;
+  renderSources();
+}
+
+function renderSources(){
+  const total = sources.reduce((a,s)=>a+s.images.length,0);
+  selAll.disabled=selNone.disabled = total===0;
+  squareBar.style.display = total? 'flex':'none';
+  srcCount.textContent = total? `${total} 枚`:'';
+  sourcesEl.innerHTML='';
+  sources.forEach((s,si)=>{
+    const h=document.createElement('div');
+    const head=document.createElement('div'); head.className='grouptitle';
+    head.textContent = s.title + (s.error? `　⚠ ${s.error}`:` — ${s.images.length}枚`);
+    h.appendChild(head);
+    if(s.images.length){
+      const g=document.createElement('div'); g.className='grid';
+      s.images.forEach((im,ii)=>{
+        const c=document.createElement('div'); c.className='card'+(im.sel?' sel':'');
+        c.innerHTML=`<div class="thumb"><span class="tick">✓</span><img loading="lazy" src="/api/img?src=${encodeURIComponent(im.src)}"></div>`;
+        c.querySelector('.thumb').onclick=()=>{ im.sel=!im.sel; c.classList.toggle('sel', im.sel); updateSel(); };
+        g.appendChild(c);
+      });
+      h.appendChild(g);
+    }
+    sourcesEl.appendChild(h);
+  });
+  updateSel();
+}
+function setAll(v){ sources.forEach(s=>s.images.forEach(im=>im.sel=v)); renderSources(); }
+function updateSel(){
+  const n = sources.reduce((a,s)=>a+s.images.filter(im=>im.sel).length,0);
+  selCount.textContent = `${n} 枚を選択中`;
+  squareBtn.disabled = n===0;
+}
+
+// ---- 正方形化（Canvasで背景拡張）----
+function targetSize(w,h){
+  const m=sizeMode.value;
+  if(m==='long') return Math.max(w,h);
+  if(m==='custom') return Math.max(50, parseInt(customSize.value)||1500);
+  return parseInt(m);
+}
+function sampleEdgeColor(sctx,nw){
+  try{ const top=sctx.getImageData(0,0,nw,1).data; let r=0,g=0,b=0,n=0;
+    for(let i=0;i<top.length;i+=4){ r+=top[i]; g+=top[i+1]; b+=top[i+2]; n++; }
+    return `rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`;
+  }catch(e){ return '#ffffff'; }
+}
+function processImage(img){
+  const w=img.naturalWidth, h=img.naturalHeight, size=targetSize(w,h);
+  const scale=Math.min(size/w,size/h);
+  const nw=Math.max(1,Math.round(w*scale)), nh=Math.max(1,Math.round(h*scale));
+  const scaled=document.createElement('canvas'); scaled.width=nw; scaled.height=nh;
+  const sctx=scaled.getContext('2d'); sctx.imageSmoothingEnabled=true; sctx.imageSmoothingQuality='high';
+  sctx.drawImage(img,0,0,nw,nh);
+  const px=Math.floor((size-nw)/2), py=Math.floor((size-nh)/2);
+  const out=document.createElement('canvas'); out.width=size; out.height=size;
+  const ctx=out.getContext('2d');
+  const edge=bgMode.value==='edge';
+  ctx.fillStyle=edge? sampleEdgeColor(sctx,nw):'#ffffff'; ctx.fillRect(0,0,size,size);
+  if(edge){
+    if(py>0){ ctx.drawImage(scaled,0,0,nw,1, px,0,nw,py);
+      const bH=size-(py+nh); if(bH>0) ctx.drawImage(scaled,0,nh-1,nw,1, px,py+nh,nw,bH); }
+    if(px>0){ ctx.drawImage(scaled,0,0,1,nh, 0,py,px,nh);
+      const rW=size-(px+nw); if(rW>0) ctx.drawImage(scaled,nw-1,0,1,nh, px+nw,py,rW,nh); }
+  }
+  ctx.drawImage(scaled,px,py);
+  return {canvas:out,size};
+}
+function exportBlob(canvas){ const type=fmt.value, q=parseInt(quality.value)/100;
+  return new Promise(res=> canvas.toBlob(b=>res(b), type, type==='image/jpeg'?q:undefined)); }
+function loadImageFromUrl(u){ return new Promise((res,rej)=>{ const img=new Image(); img.crossOrigin='anonymous'; img.onload=()=>res(img); img.onerror=()=>rej(new Error('load失敗')); img.src=u; }); }
+function baseName(src){ try{ const p=new URL(src).pathname.split('/').pop()||'image'; return decodeURIComponent(p).replace(/\.[^.]+$/,''); }catch(e){ return 'image'; } }
+
+async function squareSelected(){
+  const chosen=[]; sources.forEach(s=>s.images.forEach(im=>{ if(im.sel) chosen.push(im.src); }));
+  if(!chosen.length) return;
+  squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
+  const seen={};
+  for(const src of chosen){
+    try{
+      const img=await loadImageFromUrl('/api/img?src='+encodeURIComponent(src));
+      const {canvas,size}=processImage(img);
+      const blob=await exportBlob(canvas);
+      const ext=fmt.value==='image/png'?'png':'jpg';
+      let base=baseName(src); if(seen[base]) base=base+'-'+(++seen[base]); else seen[base]=1;
+      items.push({ name:`${base}.${ext}`, base, srcImg:img, blob, url:URL.createObjectURL(blob), size });
+    }catch(e){ /* skip broken */ }
+  }
+  squareBtn.disabled=false; squareBtn.textContent='選択した画像を正方形化 →';
+  renderOut();
+}
+async function reprocessAll(){
+  if(!items.length) return;
+  for(const it of items){
+    const {canvas,size}=processImage(it.srcImg); it.size=size;
+    URL.revokeObjectURL(it.url); it.blob=await exportBlob(canvas);
+    const ext=fmt.value==='image/png'?'png':'jpg'; it.name=`${it.base}.${ext}`; it.url=URL.createObjectURL(it.blob);
+  }
+  renderOut();
+}
+function renderOut(){
+  outCount.textContent = items.length? `${items.length} 枚`:'';
+  zipBtn.disabled=clearBtn.disabled = items.length===0;
+  if(!items.length){ grid.innerHTML=''; grid.appendChild(emptyMsg); return; }
+  grid.innerHTML='';
+  items.forEach(it=>{
+    const c=document.createElement('div'); c.className='card';
+    c.innerHTML=`<div class="thumb"><img src="${it.url}"></div>
+      <div class="meta"><div class="name" title="${it.name}">${it.name}</div>
+      <div class="dim">${it.size} × ${it.size} px</div>
+      <a href="${it.url}" download="${it.name}">⤓ ダウンロード</a></div>`;
+    grid.appendChild(c);
+  });
+}
+async function downloadZip(){
+  const zip=new JSZip(); items.forEach(it=> zip.file(it.name, it.blob));
+  const blob=await zip.generateAsync({type:'blob'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='squared_images.zip'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+</script>
+</body>
+</html>
