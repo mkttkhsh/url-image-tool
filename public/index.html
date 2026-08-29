@@ -133,7 +133,7 @@
 
   <h2>2. 正方形化した画像</h2>
   <div class="bar">
-    <button id="zipBtn" disabled>ZIPでまとめてダウンロード</button>
+    <button id="zipBtn" disabled>画像＋テキストをZIPダウンロード</button>
     <button class="ghost" id="clearBtn" disabled>クリア</button>
     <span class="count" id="outCount"></span>
   </div>
@@ -177,9 +177,9 @@ async function doFetch(){
     try{
       const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
       const d = await r.json();
-      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.price||'', description:d.description||'', images:[], gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
-      sources.push({ pageUrl, title:d.title||pageUrl, price:d.price||'', description:d.description||'', gen:null, images:d.images.map(src=>({src, sel:true})) });
+      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null, images:d.images.map(src=>({src, sel:true})) });
     }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
   }
   fetchBtn.disabled=false;
@@ -264,6 +264,7 @@ function renderSources(){
     sourcesEl.appendChild(card);
   });
   updateSel();
+  updateZipBtn();
 }
 
 async function generateText(si, btn){
@@ -363,7 +364,7 @@ async function squareSelected(){
     const selImgs=s.images.filter(im=>im.sel);
     if(!selImgs.length) return;
     productNo++;
-    selImgs.forEach((im,i)=> jobs.push({ src:im.src, title:s.title, idx:i+1, productNo }));
+    selImgs.forEach((im,i)=> jobs.push({ src:im.src, title:s.title, idx:i+1, productNo, prod:s }));
   });
   if(!jobs.length) return;
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
@@ -379,7 +380,7 @@ async function squareSelected(){
         : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
       let base = urlNum.value==='on' ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
       if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
-      items.push({ name:`${base}.${ext}`, base, srcImg:img, blob, url:URL.createObjectURL(blob), size });
+      items.push({ name:`${base}.${ext}`, base, ext, srcImg:img, blob, url:URL.createObjectURL(blob), size, prod:job.prod });
     }catch(e){ /* skip broken */ }
   }
   squareBtn.disabled=false; squareBtn.textContent='選択した画像を正方形化 →';
@@ -396,7 +397,8 @@ async function reprocessAll(){
 }
 function renderOut(){
   outCount.textContent = items.length? `${items.length} 枚`:'';
-  zipBtn.disabled=clearBtn.disabled = items.length===0;
+  clearBtn.disabled = items.length===0;
+  updateZipBtn();
   if(!items.length){ grid.innerHTML=''; grid.appendChild(emptyMsg); return; }
   grid.innerHTML='';
   items.forEach(it=>{
@@ -409,11 +411,24 @@ function renderOut(){
   });
 }
 async function downloadZip(){
-  const zip=new JSZip(); items.forEach(it=> zip.file(it.name, it.blob));
+  const zip=new JSZip();
+  let productNo=0, added=0;
+  for(const s of sources){
+    if(!(s.title || (s.images&&s.images.length))) continue;
+    productNo++;
+    const slug=slugifyTitle(s.title);
+    const folder=`${String(productNo).padStart(2,'0')}_${slug}`;
+    const imgs=items.filter(it=>it.prod===s);
+    imgs.forEach((it,k)=>{ zip.file(`${folder}/${slug}-${String(k+1).padStart(2,'0')}.${it.ext}`, it.blob); added++; });
+    if(s.gen || s.description || s.price){ zip.file(`${folder}/product.txt`, productText(s)); added++; }
+  }
+  // sources に紐づかない画像（保険）
+  if(added===0){ items.forEach(it=> zip.file(it.name, it.blob)); }
   const blob=await zip.generateAsync({type:'blob'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='squared_images.zip'; a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='246_listing.zip'; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
+function updateZipBtn(){ zipBtn.disabled = !(items.length || sources.some(s=>s.gen||s.description||s.price)); }
 </script>
 </body>
 </html>

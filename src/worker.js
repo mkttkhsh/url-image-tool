@@ -37,7 +37,7 @@ async function handleScrape(url) {
   let u;
   try { u = new URL(target); } catch (e) { return json({ error: 'URLが不正です' }, 400); }
 
-  let title = '', images = [], source = '', price = '', description = '';
+  let title = '', images = [], source = '', price = '', description = '', currency = '';
   try {
     // 1) Shopify: /products/<handle> → <handle>.json（最も正確・高解像）
     const m = u.pathname.match(/\/products\/([^/?#]+)/);
@@ -53,11 +53,15 @@ async function handleScrape(url) {
           price = v.price != null ? String(v.price) : '';
           description = stripHtml(d.product.body_html || '');
           source = 'shopify';
+          try {
+            const mr = await fetch(`${u.origin}/meta.json`, { headers: { 'User-Agent': UA } });
+            if (mr.ok) { const md = await mr.json(); currency = md.currency || ''; }
+          } catch (e) { /* ignore */ }
         }
       }
     }
-    // 2) フォールバック: HTMLから og:image / JSON-LD / <img> ＋ 価格・説明を抽出
-    if (images.length === 0 || !price || !description) {
+    // 2) フォールバック: HTMLから og:image / JSON-LD / <img> ＋ 価格・通貨・説明を抽出
+    if (images.length === 0 || !price || !description || !currency) {
       const r = await fetch(target, { headers: { 'User-Agent': UA } });
       const html = await r.text();
       if (!title) {
@@ -67,6 +71,7 @@ async function handleScrape(url) {
       if (images.length === 0) { images = extractFromHtml(html, u); source = source || 'html'; }
       const meta = extractMeta(html);
       if (!price) price = meta.price;
+      if (!currency) currency = meta.currency;
       if (!description) description = meta.description;
     }
   } catch (e) {
@@ -74,34 +79,73 @@ async function handleScrape(url) {
   }
 
   images = dedup(images.map(s => absolutize(s, u)).filter(Boolean));
-  return json({ title, price, description, images, count: images.length, source });
+  const { priceJpy, priceText } = await toPriceText(price, currency);
+  return json({ title, price, currency, priceJpy, priceText, description, images, count: images.length, source });
 }
 
-// HTMLから価格・説明の候補を拾う（JSON-LD offers.price / og:price / meta description）
+// 価格を日本円換算した表示文字列を作る
+async function toPriceText(price, currency) {
+  if (!price) return { priceJpy: null, priceText: '' };
+  const num = parseFloat(String(price).replace(/[^0-9.]/g, ''));
+  const cur = (currency || '').toUpperCase();
+  if (isNaN(num)) return { priceJpy: null, priceText: String(price) + (cur ? ' ' + cur : '') };
+  if (cur === 'JPY' || (!cur && /[¥￥]|円/.test(String(price)))) {
+    return { priceJpy: Math.round(num), priceText: `¥${fmtNum(Math.round(num))}` };
+  }
+  if (cur) {
+    const rate = await fxToJpy(cur);
+    if (rate) {
+      const jpy = Math.round(num * rate / 100) * 100; // 100円単位に丸め
+      return { priceJpy: jpy, priceText: `約¥${fmtNum(jpy)}（${trimNum(num)} ${cur}）` };
+    }
+    return { priceJpy: null, priceText: `${trimNum(num)} ${cur}` };
+  }
+  return { priceJpy: null, priceText: trimNum(num) };
+}
+async function fxToJpy(cur) {
+  if (cur === 'JPY') return 1;
+  try {
+    const r = await fetch(`https://api.frankfurter.dev/v1/latest?base=${cur}&symbols=JPY`);
+    if (r.ok) { const d = await r.json(); if (d.rates && d.rates.JPY) return d.rates.JPY; }
+  } catch (e) { /* ignore */ }
+  try {
+    const r = await fetch(`https://open.er-api.com/v6/latest/${cur}`);
+    if (r.ok) { const d = await r.json(); if (d.rates && d.rates.JPY) return d.rates.JPY; }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+function fmtNum(n) { return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function trimNum(n) { return (Math.round(n * 100) / 100).toString(); }
+
+// HTMLから価格・通貨・説明の候補を拾う（JSON-LD offers / og:price / meta description）
 function extractMeta(html) {
-  let price = '', description = '';
-  const ldPrice = [], ldDesc = [];
+  let price = '', description = '', currency = '';
+  const ldPrice = [], ldDesc = [], ldCur = [];
   for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
-    try { collectLd(JSON.parse(m[1].trim()), ldPrice, ldDesc); } catch (e) { /* ignore */ }
+    try { collectLd(JSON.parse(m[1].trim()), ldPrice, ldDesc, ldCur); } catch (e) { /* ignore */ }
   }
   const ogPrice = html.match(/<meta[^>]+property=["']product:price:amount["'][^>]+content=["']([^"']+)["']/i);
+  const ogCur = html.match(/<meta[^>]+property=["'](?:product:price:currency|og:price:currency)["'][^>]+content=["']([^"']+)["']/i);
   const metaDesc = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)
                  || html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']/i);
   price = ldPrice[0] || (ogPrice ? ogPrice[1] : '');
+  currency = ldCur[0] || (ogCur ? ogCur[1] : '');
   description = stripHtml(ldDesc[0] || '') || (metaDesc ? decodeHtml(metaDesc[1]) : '');
-  return { price, description };
+  return { price, currency, description };
 }
-function collectLd(node, prices, descs) {
+function collectLd(node, prices, descs, curs) {
   if (!node) return;
-  if (Array.isArray(node)) { node.forEach(n => collectLd(n, prices, descs)); return; }
+  if (Array.isArray(node)) { node.forEach(n => collectLd(n, prices, descs, curs)); return; }
   if (typeof node === 'object') {
     if (node.offers) {
       const off = Array.isArray(node.offers) ? node.offers[0] : node.offers;
       if (off && off.price != null) prices.push(String(off.price));
+      if (off && off.priceCurrency) curs.push(String(off.priceCurrency));
     }
     if (node.price != null && node['@type'] && /Offer/i.test(node['@type'])) prices.push(String(node.price));
+    if (node.priceCurrency) curs.push(String(node.priceCurrency));
     if (typeof node.description === 'string' && node.description.trim()) descs.push(node.description);
-    for (const k in node) if (node[k] && typeof node[k] === 'object') collectLd(node[k], prices, descs);
+    for (const k in node) if (node[k] && typeof node[k] === 'object') collectLd(node[k], prices, descs, curs);
   }
 }
 function stripHtml(s) {
@@ -154,8 +198,9 @@ function buildPrompt(title, price, description) {
 - 文末は「〜である／〜だ」で統一。過度な修飾や詩的表現を避け、事実ベースで簡潔に。
 - 順序: 素材・デザイン → ディテール・機能 → 製造背景・ブランド背景。英語原文は忠実に和訳して要点を整える。
 - 推測で断定しない。原文に無い情報は書かない。公式説明が取得できていない場合は、商品名から確実に言える範囲に留める。
-## PR文（30字前後）
+## PR文（20〜40字）
 - 一文で商品の印象・価値を端的に表す。語彙は簡潔かつ洗練。
+- 長さは20〜40字の範囲で、説明内容に応じて過不足のない最適な長さにする（情報が薄ければ短く、要素が多ければ長めに）。冗長な引き伸ばしはしない。
 - 「融合」「構造美」「宿す」「際立つ」「纏う」等の価値語を活かし、素材の特徴／デザイン性／機能性／ブランドの世界観のいずれかを必ず含める。`;
 }
 
