@@ -78,6 +78,10 @@
       <label>形式</label>
       <select id="fmt"><option value="image/jpeg">JPEG</option><option value="image/png">PNG</option></select>
     </div>
+    <div class="field">
+      <label>ファイル名</label>
+      <select id="nameMode"><option value="product">商品名＋連番</option><option value="orig">元画像名</option></select>
+    </div>
     <div class="field" id="qWrap">
       <label>JPEG品質 <span id="qVal">95</span></label>
       <div class="range"><input type="range" id="quality" min="60" max="100" value="95"></div>
@@ -118,7 +122,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
-const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap');
+const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -232,19 +236,26 @@ function exportBlob(canvas){ const type=fmt.value, q=parseInt(quality.value)/100
   return new Promise(res=> canvas.toBlob(b=>res(b), type, type==='image/jpeg'?q:undefined)); }
 function loadImageFromUrl(u){ return new Promise((res,rej)=>{ const img=new Image(); img.crossOrigin='anonymous'; img.onload=()=>res(img); img.onerror=()=>rej(new Error('load失敗')); img.src=u; }); }
 function baseName(src){ try{ const p=new URL(src).pathname.split('/').pop()||'image'; return decodeURIComponent(p).replace(/\.[^.]+$/,''); }catch(e){ return 'image'; } }
+// ファイル名に使えない文字を除去（Windows/Mac両対応）。日本語・スペースは保持。
+function slugifyTitle(t){ return (t||'image').replace(/[\/\\:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim() || 'image'; }
 
 async function squareSelected(){
-  const chosen=[]; sources.forEach(s=>s.images.forEach(im=>{ if(im.sel) chosen.push(im.src); }));
-  if(!chosen.length) return;
+  // 選択画像を商品ごとに集め、商品内で連番を振る
+  const jobs=[];
+  sources.forEach(s=>{ let idx=0; s.images.forEach(im=>{ if(im.sel){ idx++; jobs.push({ src:im.src, title:s.title, idx }); } }); });
+  if(!jobs.length) return;
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
   const seen={};
-  for(const src of chosen){
+  for(const job of jobs){
     try{
-      const img=await loadImageFromUrl('/api/img?src='+encodeURIComponent(src));
+      const img=await loadImageFromUrl('/api/img?src='+encodeURIComponent(job.src));
       const {canvas,size}=processImage(img);
       const blob=await exportBlob(canvas);
       const ext=fmt.value==='image/png'?'png':'jpg';
-      let base=baseName(src); if(seen[base]) base=base+'-'+(++seen[base]); else seen[base]=1;
+      let base = nameMode.value==='orig'
+        ? baseName(job.src)
+        : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
+      if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
       items.push({ name:`${base}.${ext}`, base, srcImg:img, blob, url:URL.createObjectURL(blob), size });
     }catch(e){ /* skip broken */ }
   }
