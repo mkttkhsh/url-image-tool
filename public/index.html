@@ -36,6 +36,7 @@
   .thumb img{ width:100%; height:100%; object-fit:contain; display:block; }
   .tick{ position:absolute; top:8px; left:8px; width:22px; height:22px; border-radius:6px; background:rgba(0,0,0,.55); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:13px; color:transparent; }
   .card.sel .tick{ background:var(--accent2); color:#fff; border-color:var(--accent2); }
+  .badge{ position:absolute; top:8px; right:8px; background:rgba(0,0,0,.6); color:var(--warn); font-size:10px; padding:2px 6px; border-radius:6px; border:1px solid var(--line); }
   .meta{ padding:9px 11px; font-size:12px; }
   .meta .name{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .meta .dim{ color:var(--muted); margin-top:2px; }
@@ -114,6 +115,7 @@
     <textarea id="urls" placeholder="https://d1milano.com/products/aape-grey-camo-nylon&#10;https://d1milano.com/products/aape-red-camo-canva"></textarea>
     <div class="bar">
       <button id="fetchBtn">写真・情報を取得</button>
+      <button class="ghost" id="manualBtn">＋手動で商品を追加</button>
       <button class="ghost" id="genAllBtn" disabled>全商品のテキスト生成</button>
       <button class="ghost" id="selAll" disabled>全選択</button>
       <button class="ghost" id="selNone" disabled>全解除</button>
@@ -160,6 +162,7 @@ quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
 
 fetchBtn.onclick = doFetch;
+$('#manualBtn').onclick = addManualProduct;
 genAllBtn.onclick = genAll;
 selAll.onclick = ()=> setAll(true);
 selNone.onclick = ()=> setAll(false);
@@ -179,7 +182,8 @@ async function doFetch(){
       const d = await r.json();
       if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
-      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null, images:d.images.map(src=>({src, sel:true})) });
+      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null,
+        images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })) });
     }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
   }
   fetchBtn.disabled=false;
@@ -248,14 +252,18 @@ function renderSources(){
       card.appendChild(gw);
     }
 
-    // 画像グリッド
+    // 画像グリッド（取得画像＋手動アップロード）
+    const ih=document.createElement('div'); ih.className='imgs-h';
+    ih.innerHTML = `<span>画像 ${s.images.length}枚${s.images.length?'（クリックで選択切替）':'（取得できていません）'}</span>`;
+    const addBtn=document.createElement('button'); addBtn.className='ghost mini'; addBtn.style.marginLeft='10px';
+    addBtn.textContent='＋画像をアップロード'; addBtn.onclick=()=>addManualImages(si);
+    ih.appendChild(addBtn);
+    card.appendChild(ih);
     if(s.images.length){
-      const ih=document.createElement('div'); ih.className='imgs-h'; ih.textContent=`画像 ${s.images.length}枚（クリックで選択切替）`;
-      card.appendChild(ih);
       const g=document.createElement('div'); g.className='grid';
       s.images.forEach((im)=>{
         const c=document.createElement('div'); c.className='card'+(im.sel?' sel':'');
-        c.innerHTML=`<div class="thumb"><span class="tick">✓</span><img loading="lazy" src="/api/img?src=${encodeURIComponent(im.src)}"></div>`;
+        c.innerHTML=`<div class="thumb"><span class="tick">✓</span>${im.local?'<span class="badge">手動</span>':''}<img loading="lazy" src="${im.url}"></div>`;
         c.querySelector('.thumb').onclick=()=>{ im.sel=!im.sel; c.classList.toggle('sel', im.sel); updateSel(); };
         g.appendChild(c);
       });
@@ -308,6 +316,21 @@ async function copyProduct(s, kind, btn){
   const text = kind==='pr'? (s.gen&&s.gen.pr||'') : kind==='desc'? (s.gen&&s.gen.desc||'') : productText(s);
   try{ await navigator.clipboard.writeText(text); const o=btn.textContent; btn.textContent='コピーしました ✓'; setTimeout(()=>btn.textContent=o,1200); }
   catch(e){ alert('コピーできませんでした'); }
+}
+function addManualImages(si){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*'; inp.multiple=true;
+  inp.onchange=e=>{
+    const files=[...e.target.files].filter(f=>f.type.startsWith('image/'));
+    files.forEach(f=> sources[si].images.push({ url:URL.createObjectURL(f), name:f.name, local:true, sel:true }));
+    renderSources();
+  };
+  inp.click();
+}
+function addManualProduct(){
+  const title=(prompt('商品名を入力してください（後でテキスト生成にも使われます）','')||'').trim();
+  if(!title) return;
+  sources.push({ pageUrl:'', title, price:'', description:'', gen:null, images:[], manual:true });
+  renderSources();
 }
 function setAll(v){ sources.forEach(s=>s.images.forEach(im=>im.sel=v)); renderSources(); }
 function updateSel(){
@@ -364,19 +387,20 @@ async function squareSelected(){
     const selImgs=s.images.filter(im=>im.sel);
     if(!selImgs.length) return;
     productNo++;
-    selImgs.forEach((im,i)=> jobs.push({ src:im.src, title:s.title, idx:i+1, productNo, prod:s }));
+    selImgs.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s }));
   });
   if(!jobs.length) return;
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
   const seen={};
   for(const job of jobs){
     try{
-      const img=await loadImageFromUrl('/api/img?src='+encodeURIComponent(job.src));
+      const img=await loadImageFromUrl(job.im.url);
       const {canvas,size}=processImage(img);
       const blob=await exportBlob(canvas);
       const ext=fmt.value==='image/png'?'png':'jpg';
+      const origName = job.im.local ? (job.im.name||'image').replace(/\.[^.]+$/,'') : baseName(job.im.remoteSrc);
       const core = nameMode.value==='orig'
-        ? baseName(job.src)
+        ? origName
         : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
       let base = urlNum.value==='on' ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
       if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
