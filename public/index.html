@@ -130,11 +130,15 @@
     <textarea id="urls" placeholder="https://d1milano.com/products/aape-grey-camo-nylon&#10;https://d1milano.com/products/aape-red-camo-canva"></textarea>
     <div class="bar">
       <button id="fetchBtn">写真・情報を取得</button>
+      <button class="ghost" id="openAllBtn">🔗 商品ページを新規タブで開く</button>
       <button class="ghost" id="manualBtn">＋手動で商品を追加</button>
       <button class="ghost" id="genAllBtn" disabled>全商品のテキスト生成</button>
       <button class="ghost" id="selAll" disabled>全選択</button>
       <button class="ghost" id="selNone" disabled>全解除</button>
       <span class="count" id="srcCount"></span>
+    </div>
+    <div class="bar" style="margin-top:-4px">
+      <label style="font-size:13px;color:var(--muted)"><input type="checkbox" id="autoOpen" checked> 取得ボタンを押したら商品ページも自動で新規タブに開く</label>
     </div>
     <div class="msg" id="fetchMsg"></div>
   </div>
@@ -179,6 +183,7 @@ quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
 
 fetchBtn.onclick = doFetch;
+$('#openAllBtn').onclick = ()=>openAllUrls(collectUrls());
 $('#manualBtn').onclick = addManualProduct;
 genAllBtn.onclick = genAll;
 selAll.onclick = ()=> setAll(true);
@@ -187,9 +192,28 @@ squareBtn.onclick = squareSelected;
 zipBtn.onclick = downloadZip;
 clearBtn.onclick = ()=>{ items.forEach(it=>URL.revokeObjectURL(it.url)); items=[]; renderOut(); };
 
+function collectUrls(){
+  return urls.value.split(/\s+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
+}
+function openAllUrls(list){
+  if(!list.length){ fetchMsg.className='msg err'; fetchMsg.textContent='開けるURLがありません'; return 0; }
+  let opened=0, blocked=0;
+  for(const u of list){
+    const w=window.open(u, '_blank', 'noopener');
+    if(w) opened++; else blocked++;
+  }
+  if(blocked){
+    fetchMsg.className='msg err';
+    fetchMsg.textContent=`${opened}件のタブを開きました（${blocked}件はポップアップブロックで開けず — このサイトのポップアップを許可してください）`;
+  }
+  return opened;
+}
 async function doFetch(){
-  const list = urls.value.split(/\s+/).map(s=>s.trim()).filter(Boolean);
+  const list = collectUrls();
   if(!list.length){ fetchMsg.className='msg err'; fetchMsg.textContent='URLを入力してください'; return; }
+  // ポップアップブロッカー回避：ユーザークリックイベントの同期処理の中で window.open する必要があるため
+  // 取得の非同期処理を始める前にここで開く
+  if($('#autoOpen').checked) openAllUrls(list);
   fetchBtn.disabled=true; fetchMsg.className='msg'; fetchMsg.innerHTML='<span class="spin"></span>取得中…';
   sources=[];
   let ok=0, ng=0;
@@ -224,11 +248,12 @@ function renderSources(){
   sources.forEach((s,si)=>{
     const card=document.createElement('div'); card.className='prodcard';
 
-    // 見出し: 商品名＋価格
+    // 見出し: 商品名＋価格＋ページを開くリンク
     const head=document.createElement('div'); head.className='prodhead';
     head.innerHTML = `<span class="pt">${esc(s.title)}</span>`
       + (s.price? `<span class="pp">${esc(s.price)}</span>`:'')
       + ((s.videos&&s.videos.length)? `<span class="pp" style="color:var(--accent)">▶ 動画 ${s.videos.length}本</span>`:'')
+      + (s.pageUrl? `<a href="${esc(s.pageUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">ページを開く ↗</a>`:'')
       + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'');
     card.appendChild(head);
 
