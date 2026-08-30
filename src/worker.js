@@ -37,9 +37,9 @@ async function handleScrape(url) {
   let u;
   try { u = new URL(target); } catch (e) { return json({ error: 'URLが不正です' }, 400); }
 
-  let title = '', images = [], source = '', price = '', description = '', currency = '';
+  let title = '', images = [], videos = [], source = '', price = '', description = '', currency = '';
   try {
-    // 1) Shopify: /products/<handle> → <handle>.json（最も正確・高解像）
+    // 1) Shopify: /products/<handle> → <handle>.json（画像）＋<handle>.js（動画含むmedia）
     const m = u.pathname.match(/\/products\/([^/?#]+)/);
     if (m) {
       const jsonUrl = `${u.origin}/products/${m[1]}.json`;
@@ -59,9 +59,25 @@ async function handleScrape(url) {
           } catch (e) { /* ignore */ }
         }
       }
+      // .js エンドポイントで media（動画含む）を追加取得
+      try {
+        const jsUrl = `${u.origin}/products/${m[1]}.js`;
+        const rr = await fetch(jsUrl, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+        if (rr.ok) {
+          const dd = await rr.json();
+          for (const md of (dd.media || [])) {
+            if (md.media_type === 'video' && Array.isArray(md.sources)) {
+              // 最大サイズ/最高品質のmp4を選ぶ（無ければ先頭）
+              const mp4s = md.sources.filter(s => (s.mime_type || '').includes('mp4') || /\.mp4/i.test(s.url || ''));
+              const pick = mp4s.sort((a, b) => (b.width || 0) - (a.width || 0))[0] || md.sources[0];
+              if (pick && pick.url) videos.push(pick.url);
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
     }
-    // 2) フォールバック: HTMLから og:image / JSON-LD / <img> ＋ 価格・通貨・説明を抽出
-    if (images.length === 0 || !price || !description || !currency) {
+    // 2) フォールバック: HTMLから og:image / JSON-LD / <img> ＋ 価格・通貨・説明・動画を抽出
+    if (images.length === 0 || videos.length === 0 || !price || !description || !currency) {
       const r = await fetch(target, { headers: { 'User-Agent': UA } });
       const html = await r.text();
       if (!title) {
@@ -69,6 +85,7 @@ async function handleScrape(url) {
         if (t) title = decodeHtml(t[1].trim());
       }
       if (images.length === 0) { images = extractFromHtml(html, u); source = source || 'html'; }
+      if (videos.length === 0) { videos = extractVideosFromHtml(html); }
       const meta = extractMeta(html);
       if (!price) price = meta.price;
       if (!currency) currency = meta.currency;
@@ -79,8 +96,9 @@ async function handleScrape(url) {
   }
 
   images = dedup(images.map(s => absolutize(s, u)).filter(Boolean));
+  videos = dedup(videos.map(s => absolutize(s, u)).filter(Boolean));
   const { priceJpy, priceText } = await toPriceText(price, currency);
-  return json({ title, price, currency, priceJpy, priceText, description, images, count: images.length, source });
+  return json({ title, price, currency, priceJpy, priceText, description, images, videos, count: images.length, videoCount: videos.length, source });
 }
 
 // 価格を日本円換算した表示文字列を作る
@@ -260,6 +278,35 @@ function collectLdImages(node, out) {
       else if (node.image.url) out.push(node.image.url);
     }
     for (const k in node) if (node[k] && typeof node[k] === 'object') collectLdImages(node[k], out);
+  }
+}
+// HTMLから自ホスト動画URLを抽出（YouTube/Vimeo等の外部プレーヤーは対象外）
+function extractVideosFromHtml(html) {
+  const out = [];
+  const VIDEO_EXT = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
+  // <video src="..."> と <source src="..."> と data-src バリアント
+  for (const m of html.matchAll(/<(?:video|source)[^>]*\b(?:src|data-src|data-video-src)=["']([^"']+)["']/gi)) {
+    if (VIDEO_EXT.test(m[1])) out.push(m[1]);
+  }
+  // og:video / og:video:secure_url
+  for (const m of html.matchAll(/<meta[^>]+property=["']og:video(?::secure_url|:url)?["'][^>]+content=["']([^"']+)["']/gi)) {
+    if (VIDEO_EXT.test(m[1])) out.push(m[1]);
+  }
+  // JSON-LD の VideoObject.contentUrl
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try { collectLdVideos(JSON.parse(m[1].trim()), out); } catch (e) { /* ignore */ }
+  }
+  return out;
+}
+function collectLdVideos(node, out) {
+  if (!node) return;
+  if (Array.isArray(node)) { node.forEach(n => collectLdVideos(n, out)); return; }
+  if (typeof node === 'object') {
+    const t = node['@type'];
+    if ((t === 'VideoObject' || (Array.isArray(t) && t.includes('VideoObject'))) && node.contentUrl) {
+      out.push(String(node.contentUrl));
+    }
+    for (const k in node) if (node[k] && typeof node[k] === 'object') collectLdVideos(node[k], out);
   }
 }
 function absolutize(s, u) { try { return new URL(s, u).href; } catch (e) { return null; } }

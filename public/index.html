@@ -69,16 +69,23 @@
 <body>
 <header>
   <h1>URL取得＋正方形化ツール</h1>
-  <div class="sub">商品ページのURLを入れると写真・価格・説明を取得。背景を拡張して正方形化（元が正方形なら無加工でDL可）、である調説明文＋PR文も自動生成します。</div>
+  <div class="sub">商品ページのURLを入れると写真・価格・説明・動画を取得。元画像＋1080×1080の両方を保存できて、である調説明文＋PR文も自動生成します。</div>
 </header>
 <div class="wrap">
 
   <div class="controls">
     <div class="field">
-      <label>出力サイズ</label>
+      <label>出力する画像</label>
+      <div style="display:flex;gap:14px;padding:6px 0">
+        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outOrig" checked> 元画像（無加工）</label>
+        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outSquare" checked> 正方形化</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>正方形サイズ</label>
       <select id="sizeMode">
+        <option value="1080" selected>1080 × 1080</option>
         <option value="long">長辺に合わせる（拡大なし）</option>
-        <option value="1080">1080 × 1080</option>
         <option value="1200">1200 × 1200</option>
         <option value="2000">2000 × 2000</option>
         <option value="custom">カスタム…</option>
@@ -93,20 +100,24 @@
       <select id="bgMode"><option value="edge">端を引き延ばす（継ぎ目なし）</option><option value="white">白ベタ</option></select>
     </div>
     <div class="field">
-      <label>元が正方形なら</label>
-      <select id="passSquare"><option value="on">そのままDL（無加工・推奨）</option><option value="off">常に再エンコード</option></select>
-    </div>
-    <div class="field">
-      <label>形式</label>
+      <label>形式（正方形版）</label>
       <select id="fmt"><option value="image/jpeg">JPEG</option><option value="image/png">PNG</option></select>
     </div>
     <div class="field">
       <label>ファイル名</label>
-      <select id="nameMode"><option value="product">商品名＋連番</option><option value="orig">元画像名</option></select>
+      <select id="nameMode">
+        <option value="date" selected>日付＋連番（YYYYMMDD_01）</option>
+        <option value="product">商品名＋連番</option>
+        <option value="orig">元画像名</option>
+      </select>
     </div>
     <div class="field">
       <label>URL順の番号</label>
       <select id="urlNum"><option value="off">付けない</option><option value="on">先頭に付ける（01_…）</option></select>
+    </div>
+    <div class="field">
+      <label>動画</label>
+      <select id="incVideo"><option value="on" selected>ある場合ダウンロード</option><option value="off">スキップ</option></select>
     </div>
     <div class="field" id="qWrap">
       <label>JPEG品質 <span id="qVal">95</span></label>
@@ -131,13 +142,13 @@
   <div id="sources"></div>
 
   <div class="bar" id="squareBar" style="display:none">
-    <button id="squareBtn">選択した画像を正方形化 →</button>
+    <button id="squareBtn">選択した素材を書き出し →</button>
     <span class="count" id="selCount"></span>
   </div>
 
   <div class="divider"></div>
 
-  <h2>2. 正方形化した画像</h2>
+  <h2>2. 書き出した素材（元画像・正方形版・動画）</h2>
   <div class="bar">
     <button id="zipBtn" disabled>画像＋テキストをZIPダウンロード</button>
     <button class="ghost" id="clearBtn" disabled>クリア</button>
@@ -150,7 +161,8 @@
 <script>
 const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
-const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum'), passSquare=$('#passSquare');
+const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
+const outOrig=$('#outOrig'), outSquare=$('#outSquare'), incVideo=$('#incVideo');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount'), genAllBtn=$('#genAllBtn');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -160,7 +172,8 @@ let sources = []; // { pageUrl, title, images:[{src, sel}] }
 let items = [];    // squared results {name, base, blob, url, size}
 
 sizeMode.onchange = ()=>{ customWrap.style.display = sizeMode.value==='custom'?'flex':'none'; reprocessAll(); };
-[customSize,bgMode,passSquare].forEach(el=> el.onchange = reprocessAll);
+[customSize,bgMode].forEach(el=> el.onchange = reprocessAll);
+[outOrig,outSquare].forEach(el=> el.onchange = reprocessAll);
 fmt.onchange = ()=>{ qWrap.style.opacity = fmt.value==='image/jpeg'?'1':'.4'; reprocessAll(); };
 quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
@@ -184,10 +197,12 @@ async function doFetch(){
     try{
       const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
       const d = await r.json();
-      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
+      const vids=(d.videos||[]).map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true }));
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
       sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null,
-        images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })) });
+        images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })),
+        videos:vids });
     }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
   }
   fetchBtn.disabled=false;
@@ -213,6 +228,7 @@ function renderSources(){
     const head=document.createElement('div'); head.className='prodhead';
     head.innerHTML = `<span class="pt">${esc(s.title)}</span>`
       + (s.price? `<span class="pp">${esc(s.price)}</span>`:'')
+      + ((s.videos&&s.videos.length)? `<span class="pp" style="color:var(--accent)">▶ 動画 ${s.videos.length}本</span>`:'')
       + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'');
     card.appendChild(head);
 
@@ -400,65 +416,93 @@ function origExt(im, blob){
 }
 // 元画像がほぼ正方形か（±2pxの許容）
 function isSquareImg(img){ return Math.abs(img.naturalWidth - img.naturalHeight) <= 2; }
+// 今日の日付 YYYYMMDD（ローカル）
+function todayYmd(){ const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`; }
+// 動画の拡張子推定（URL→MIME）
+function videoExt(src, blob){
+  try{ const p=new URL(src).pathname; const m=p.match(/\.(mp4|webm|mov|m4v)(\?|#|$)/i); if(m) return m[1].toLowerCase(); }catch(e){}
+  const t=(blob&&blob.type)||'';
+  if(t.includes('webm')) return 'webm';
+  if(t.includes('quicktime')) return 'mov';
+  return 'mp4';
+}
 // ファイル名に使えない文字を除去（Windows/Mac両対応）。日本語・スペースは保持。
 function slugifyTitle(t){ return (t||'image').replace(/[\/\\:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim() || 'image'; }
+
+// ファイル名の共通ベース（拡張子とバリアント接尾辞を除く）
+function makeBaseName(job, ymd, globalNo, seen){
+  let core;
+  if(nameMode.value==='date'){
+    core = `${ymd}_${String(globalNo).padStart(2,'0')}`;
+  } else if(nameMode.value==='orig'){
+    core = job.im.local ? (job.im.name||'image').replace(/\.[^.]+$/,'') : baseName(job.im.remoteSrc);
+  } else {
+    core = `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
+  }
+  let base = urlNum.value==='on' && nameMode.value!=='date'
+    ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
+  if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
+  return base;
+}
 
 async function squareSelected(){
   // 選択画像を商品ごとに集め、URL入力順に商品番号(productNo)、商品内で連番(idx)を振る
   const jobs=[]; let productNo=0;
   sources.forEach(s=>{
     const selImgs=s.images.filter(im=>im.sel);
-    if(!selImgs.length) return;
+    if(!selImgs.length && !(incVideo.value==='on' && s.videos && s.videos.length)) return;
     productNo++;
-    selImgs.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s }));
+    selImgs.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s, kind:'image' }));
+    if(incVideo.value==='on' && s.videos){
+      s.videos.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s, kind:'video' }));
+    }
   });
   if(!jobs.length) return;
+  if(!outOrig.checked && !outSquare.checked){ alert('「出力する画像」で少なくとも1つ選択してください'); return; }
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
-  const seen={};
+  const seen={}, ymd=todayYmd();
+  let globalNo = 0;
   for(const job of jobs){
     try{
-      const img=await loadImageFromUrl(job.im.url);
-      let blob, size, ext, passthrough=false;
-      if(passSquare.value==='on' && isSquareImg(img)){
-        // 元がほぼ正方形 → 再エンコードせず原本をそのまま
-        blob = await fetchOriginalBlob(job.im);
-        ext = origExt(job.im, blob);
-        size = img.naturalWidth;
-        passthrough = true;
-      } else {
-        const r=processImage(img); size=r.size;
-        blob=await exportBlob(r.canvas);
-        ext=fmt.value==='image/png'?'png':'jpg';
+      globalNo++;
+      if(job.kind==='video'){
+        const blob = await fetchOriginalBlob(job.im);
+        const ext = videoExt(job.im.remoteSrc||'', blob);
+        const base = makeBaseName(job, ymd, globalNo, seen);
+        items.push({ name:`${base}_video.${ext}`, base, ext, kind:'video', im:job.im, blob, url:URL.createObjectURL(blob), sizeLabel:'動画', prod:job.prod });
+        continue;
       }
-      const origName = job.im.local ? (job.im.name||'image').replace(/\.[^.]+$/,'') : baseName(job.im.remoteSrc);
-      const core = nameMode.value==='orig'
-        ? origName
-        : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
-      let base = urlNum.value==='on' ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
-      if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
-      items.push({ name:`${base}.${ext}`, base, ext, srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size, passthrough, prod:job.prod });
+      const img=await loadImageFromUrl(job.im.url);
+      const base = makeBaseName(job, ymd, globalNo, seen);
+      // ① 元画像（無加工）
+      if(outOrig.checked){
+        const blob = await fetchOriginalBlob(job.im);
+        const ext = origExt(job.im, blob);
+        items.push({ name:`${base}_orig.${ext}`, base, ext, kind:'orig', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size:img.naturalWidth, sizeLabel:`${img.naturalWidth}×${img.naturalHeight}`, prod:job.prod });
+      }
+      // ② 正方形化
+      if(outSquare.checked){
+        const {canvas,size}=processImage(img);
+        const blob=await exportBlob(canvas);
+        const ext=fmt.value==='image/png'?'png':'jpg';
+        items.push({ name:`${base}_${size}.${ext}`, base, ext, kind:'sq', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size, sizeLabel:`${size}×${size}`, prod:job.prod });
+      }
     }catch(e){ /* skip broken */ }
   }
-  squareBtn.disabled=false; squareBtn.textContent='選択した画像を正方形化 →';
+  squareBtn.disabled=false; squareBtn.textContent='選択した素材を書き出し →';
   renderOut();
 }
 async function reprocessAll(){
   if(!items.length) return;
+  // 設定変更時：正方形版のみ再エンコード。元画像・動画はそのまま。
   for(const it of items){
-    const passOn = passSquare.value==='on' && isSquareImg(it.srcImg);
+    if(it.kind!=='sq') continue;
     URL.revokeObjectURL(it.url);
-    if(passOn){
-      it.blob = await fetchOriginalBlob(it.im);
-      it.ext = origExt(it.im, it.blob);
-      it.size = it.srcImg.naturalWidth;
-      it.passthrough = true;
-    } else {
-      const {canvas,size}=processImage(it.srcImg); it.size=size;
-      it.blob=await exportBlob(canvas);
-      it.ext = fmt.value==='image/png'?'png':'jpg';
-      it.passthrough = false;
-    }
-    it.name=`${it.base}.${it.ext}`; it.url=URL.createObjectURL(it.blob);
+    const {canvas,size}=processImage(it.srcImg); it.size=size; it.sizeLabel=`${size}×${size}`;
+    it.blob=await exportBlob(canvas);
+    it.ext = fmt.value==='image/png'?'png':'jpg';
+    it.name=`${it.base}_${size}.${it.ext}`;
+    it.url=URL.createObjectURL(it.blob);
   }
   renderOut();
 }
@@ -470,10 +514,20 @@ function renderOut(){
   grid.innerHTML='';
   items.forEach(it=>{
     const c=document.createElement('div'); c.className='card';
-    const badge = it.passthrough? '<span class="badge" style="color:#31c48d">原本</span>' : '';
-    c.innerHTML=`<div class="thumb">${badge}<img src="${it.url}"></div>
+    let badge='', thumb='';
+    if(it.kind==='video'){
+      badge = '<span class="badge" style="color:var(--accent)">▶ 動画</span>';
+      thumb = `<video src="${it.url}" muted playsinline preload="metadata" style="width:100%;height:100%;object-fit:contain;background:#000"></video>`;
+    } else if(it.kind==='orig'){
+      badge = '<span class="badge" style="color:#31c48d">原本</span>';
+      thumb = `<img src="${it.url}">`;
+    } else {
+      badge = '<span class="badge" style="color:#98a2b3">正方形</span>';
+      thumb = `<img src="${it.url}">`;
+    }
+    c.innerHTML=`<div class="thumb">${badge}${thumb}</div>
       <div class="meta"><div class="name" title="${it.name}">${it.name}</div>
-      <div class="dim">${it.size} × ${it.size} px${it.passthrough?'（無加工）':''}</div>
+      <div class="dim">${it.sizeLabel||''}</div>
       <a href="${it.url}" download="${it.name}">⤓ ダウンロード</a></div>`;
     grid.appendChild(c);
   });
@@ -486,14 +540,14 @@ async function downloadZip(){
     productNo++;
     const slug=slugifyTitle(s.title);
     const folder=`${String(productNo).padStart(2,'0')}_${slug}`;
-    const imgs=items.filter(it=>it.prod===s);
-    imgs.forEach((it,k)=>{ zip.file(`${folder}/${slug}-${String(k+1).padStart(2,'0')}.${it.ext}`, it.blob); added++; });
+    const my=items.filter(it=>it.prod===s);
+    // 書き出したファイル名(it.name)をそのまま採用（種別サフィックス _orig/_1080/_video 付き）
+    my.forEach(it=>{ zip.file(`${folder}/${it.name}`, it.blob); added++; });
     if(s.gen || s.description || s.price){ zip.file(`${folder}/product.txt`, productText(s)); added++; }
   }
-  // sources に紐づかない画像（保険）
   if(added===0){ items.forEach(it=> zip.file(it.name, it.blob)); }
   const blob=await zip.generateAsync({type:'blob'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='246_listing.zip'; a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`246_${todayYmd()}.zip`; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 function updateZipBtn(){ zipBtn.disabled = !(items.length || sources.some(s=>s.gen||s.description||s.price)); }
