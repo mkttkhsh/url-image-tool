@@ -69,7 +69,7 @@
 <body>
 <header>
   <h1>URL取得＋正方形化ツール</h1>
-  <div class="sub">商品ページのURLを入れると写真・価格・説明を取得。背景を拡張して正方形化し、である調説明文＋PR文も自動生成します。</div>
+  <div class="sub">商品ページのURLを入れると写真・価格・説明を取得。背景を拡張して正方形化（元が正方形なら無加工でDL可）、である調説明文＋PR文も自動生成します。</div>
 </header>
 <div class="wrap">
 
@@ -91,6 +91,10 @@
     <div class="field">
       <label>背景</label>
       <select id="bgMode"><option value="edge">端を引き延ばす（継ぎ目なし）</option><option value="white">白ベタ</option></select>
+    </div>
+    <div class="field">
+      <label>元が正方形なら</label>
+      <select id="passSquare"><option value="on">そのままDL（無加工・推奨）</option><option value="off">常に再エンコード</option></select>
     </div>
     <div class="field">
       <label>形式</label>
@@ -146,7 +150,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
-const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
+const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum'), passSquare=$('#passSquare');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount'), genAllBtn=$('#genAllBtn');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -156,7 +160,7 @@ let sources = []; // { pageUrl, title, images:[{src, sel}] }
 let items = [];    // squared results {name, base, blob, url, size}
 
 sizeMode.onchange = ()=>{ customWrap.style.display = sizeMode.value==='custom'?'flex':'none'; reprocessAll(); };
-[customSize,bgMode].forEach(el=> el.onchange = reprocessAll);
+[customSize,bgMode,passSquare].forEach(el=> el.onchange = reprocessAll);
 fmt.onchange = ()=>{ qWrap.style.opacity = fmt.value==='image/jpeg'?'1':'.4'; reprocessAll(); };
 quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
@@ -321,7 +325,7 @@ function addManualImages(si){
   const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*'; inp.multiple=true;
   inp.onchange=e=>{
     const files=[...e.target.files].filter(f=>f.type.startsWith('image/'));
-    files.forEach(f=> sources[si].images.push({ url:URL.createObjectURL(f), name:f.name, local:true, sel:true }));
+    files.forEach(f=> sources[si].images.push({ url:URL.createObjectURL(f), name:f.name, file:f, local:true, sel:true }));
     renderSources();
   };
   inp.click();
@@ -377,6 +381,25 @@ function exportBlob(canvas){ const type=fmt.value, q=parseInt(quality.value)/100
   return new Promise(res=> canvas.toBlob(b=>res(b), type, type==='image/jpeg'?q:undefined)); }
 function loadImageFromUrl(u){ return new Promise((res,rej)=>{ const img=new Image(); img.crossOrigin='anonymous'; img.onload=()=>res(img); img.onerror=()=>rej(new Error('load失敗')); img.src=u; }); }
 function baseName(src){ try{ const p=new URL(src).pathname.split('/').pop()||'image'; return decodeURIComponent(p).replace(/\.[^.]+$/,''); }catch(e){ return 'image'; } }
+// 元画像のバイト列そのまま（passthrough用）：ローカルはFile、リモートは/api/img経由fetch
+async function fetchOriginalBlob(im){
+  if(im.local && im.file) return im.file;
+  const r = await fetch(im.url); if(!r.ok) throw new Error('原本の取得に失敗');
+  return await r.blob();
+}
+// 元画像の拡張子推定（ファイル名→URL→MIMEの順）
+function origExt(im, blob){
+  if(im.local && im.name){ const m=im.name.match(/\.([a-z0-9]+)$/i); if(m) return m[1].toLowerCase(); }
+  if(im.remoteSrc){ try{ const p=new URL(im.remoteSrc).pathname; const m=p.match(/\.([a-z0-9]+)$/i); if(m) return m[1].toLowerCase(); }catch(e){} }
+  const t=(blob&&blob.type)||'';
+  if(t.includes('png')) return 'png';
+  if(t.includes('webp')) return 'webp';
+  if(t.includes('avif')) return 'avif';
+  if(t.includes('gif')) return 'gif';
+  return 'jpg';
+}
+// 元画像がほぼ正方形か（±2pxの許容）
+function isSquareImg(img){ return Math.abs(img.naturalWidth - img.naturalHeight) <= 2; }
 // ファイル名に使えない文字を除去（Windows/Mac両対応）。日本語・スペースは保持。
 function slugifyTitle(t){ return (t||'image').replace(/[\/\\:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim() || 'image'; }
 
@@ -395,16 +418,25 @@ async function squareSelected(){
   for(const job of jobs){
     try{
       const img=await loadImageFromUrl(job.im.url);
-      const {canvas,size}=processImage(img);
-      const blob=await exportBlob(canvas);
-      const ext=fmt.value==='image/png'?'png':'jpg';
+      let blob, size, ext, passthrough=false;
+      if(passSquare.value==='on' && isSquareImg(img)){
+        // 元がほぼ正方形 → 再エンコードせず原本をそのまま
+        blob = await fetchOriginalBlob(job.im);
+        ext = origExt(job.im, blob);
+        size = img.naturalWidth;
+        passthrough = true;
+      } else {
+        const r=processImage(img); size=r.size;
+        blob=await exportBlob(r.canvas);
+        ext=fmt.value==='image/png'?'png':'jpg';
+      }
       const origName = job.im.local ? (job.im.name||'image').replace(/\.[^.]+$/,'') : baseName(job.im.remoteSrc);
       const core = nameMode.value==='orig'
         ? origName
         : `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
       let base = urlNum.value==='on' ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
       if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
-      items.push({ name:`${base}.${ext}`, base, ext, srcImg:img, blob, url:URL.createObjectURL(blob), size, prod:job.prod });
+      items.push({ name:`${base}.${ext}`, base, ext, srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size, passthrough, prod:job.prod });
     }catch(e){ /* skip broken */ }
   }
   squareBtn.disabled=false; squareBtn.textContent='選択した画像を正方形化 →';
@@ -413,9 +445,20 @@ async function squareSelected(){
 async function reprocessAll(){
   if(!items.length) return;
   for(const it of items){
-    const {canvas,size}=processImage(it.srcImg); it.size=size;
-    URL.revokeObjectURL(it.url); it.blob=await exportBlob(canvas);
-    const ext=fmt.value==='image/png'?'png':'jpg'; it.name=`${it.base}.${ext}`; it.url=URL.createObjectURL(it.blob);
+    const passOn = passSquare.value==='on' && isSquareImg(it.srcImg);
+    URL.revokeObjectURL(it.url);
+    if(passOn){
+      it.blob = await fetchOriginalBlob(it.im);
+      it.ext = origExt(it.im, it.blob);
+      it.size = it.srcImg.naturalWidth;
+      it.passthrough = true;
+    } else {
+      const {canvas,size}=processImage(it.srcImg); it.size=size;
+      it.blob=await exportBlob(canvas);
+      it.ext = fmt.value==='image/png'?'png':'jpg';
+      it.passthrough = false;
+    }
+    it.name=`${it.base}.${it.ext}`; it.url=URL.createObjectURL(it.blob);
   }
   renderOut();
 }
@@ -427,9 +470,10 @@ function renderOut(){
   grid.innerHTML='';
   items.forEach(it=>{
     const c=document.createElement('div'); c.className='card';
-    c.innerHTML=`<div class="thumb"><img src="${it.url}"></div>
+    const badge = it.passthrough? '<span class="badge" style="color:#31c48d">原本</span>' : '';
+    c.innerHTML=`<div class="thumb">${badge}<img src="${it.url}"></div>
       <div class="meta"><div class="name" title="${it.name}">${it.name}</div>
-      <div class="dim">${it.size} × ${it.size} px</div>
+      <div class="dim">${it.size} × ${it.size} px${it.passthrough?'（無加工）':''}</div>
       <a href="${it.url}" download="${it.name}">⤓ ダウンロード</a></div>`;
     grid.appendChild(c);
   });
