@@ -159,8 +159,28 @@
     <span class="count" id="outCount"></span>
   </div>
   <div class="grid" id="grid"><div class="empty" id="emptyMsg">まだありません。上でURLを取得し、画像を選んで「正方形化」してください。</div></div>
+
+  <div class="divider"></div>
+
+  <details id="statsWrap" open>
+    <summary style="cursor:pointer;font-size:14px;color:var(--muted);font-weight:600;margin:6px 0 12px">対応ブランド一覧（自動集計）</summary>
+    <div class="bar" style="margin-bottom:8px">
+      <button class="ghost mini" id="statsCsv">CSVでダウンロード</button>
+      <button class="ghost mini" id="statsClear">リセット</button>
+      <span class="count" id="statsCount"></span>
+    </div>
+    <div id="statsBody"></div>
+  </details>
 </div>
 <footer>取得・加工はこのアプリ内で完結。© 246 image tool</footer>
+<style>
+  table.stats{ width:100%; border-collapse:collapse; font-size:13px; }
+  table.stats th, table.stats td{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  table.stats th{ color:var(--muted); font-weight:600; font-size:12px; letter-spacing:.02em; }
+  table.stats td.num{ text-align:right; font-variant-numeric:tabular-nums; }
+  .rate-hi{ color:var(--ok); } .rate-mid{ color:var(--warn); } .rate-lo{ color:#e57373; }
+  .brand-empty{ color:var(--muted); padding:14px 0; font-size:13px; }
+</style>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -195,6 +215,76 @@ clearBtn.onclick = ()=>{ items.forEach(it=>URL.revokeObjectURL(it.url)); items=[
 function collectUrls(){
   return urls.value.split(/\s+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
 }
+
+// ---- 対応ブランド自動集計（localStorage 永続化）----
+const STATS_KEY='246_brand_stats_v1';
+function loadStats(){ try{ return JSON.parse(localStorage.getItem(STATS_KEY)||'{}'); }catch(e){ return {}; } }
+function saveStats(o){ try{ localStorage.setItem(STATS_KEY, JSON.stringify(o)); }catch(e){} }
+function hostOf(u){ try{ return new URL(u).host.replace(/^www\./,''); }catch(e){ return ''; } }
+function brandLabel(host){
+  const p=host.split('.');
+  if(p.length>=3 && p[p.length-2].length<=3 && p[p.length-1].length<=3) return p[p.length-3];
+  return p[p.length-2] || host;
+}
+function recordScrape(pageUrl, d, hadError){
+  const host = hostOf(pageUrl); if(!host) return;
+  const store = loadStats();
+  const now = new Date().toISOString();
+  const rec = store[host] || { host, brand: brandLabel(host), tries:0, images_ok:0, price_ok:0, desc_ok:0, videos_ok:0, firstAt: now, lastAt: '', lastOk:false };
+  rec.tries++;
+  rec.lastAt = now;
+  const gotImages = !hadError && d && Array.isArray(d.images) && d.images.length>0;
+  rec.lastOk = gotImages;
+  if(gotImages) rec.images_ok++;
+  if(d && d.price) rec.price_ok++;
+  if(d && d.description) rec.desc_ok++;
+  if(d && Array.isArray(d.videos) && d.videos.length>0) rec.videos_ok++;
+  store[host] = rec;
+  saveStats(store);
+}
+function rateClass(r){ return r>=0.9?'rate-hi':(r>=0.5?'rate-mid':'rate-lo'); }
+function fmtRate(ok, tries){
+  if(!tries) return '<span class="rate-lo">–</span>';
+  const r = ok/tries, pct = Math.round(r*100);
+  return `<span class="${rateClass(r)}">${ok}/${tries} (${pct}%)</span>`;
+}
+function fmtDate(iso){ if(!iso) return ''; try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }catch(e){ return ''; } }
+function renderStats(){
+  const store = loadStats();
+  const list = Object.values(store).sort((a,b)=> (b.lastAt||'').localeCompare(a.lastAt||''));
+  const body = $('#statsBody'), count = $('#statsCount');
+  count.textContent = list.length? `${list.length} ブランド`:'';
+  if(!list.length){ body.innerHTML='<div class="brand-empty">まだ集計データはありません。URLを取得すると、ここに自動でブランドごとの取得成功率がたまります。</div>'; return; }
+  const rows = list.map(r=>`<tr>
+    <td>${esc(r.brand)}</td>
+    <td><a href="https://${esc(r.host)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${esc(r.host)} ↗</a></td>
+    <td class="num">${r.tries}</td>
+    <td class="num">${fmtRate(r.images_ok, r.tries)}</td>
+    <td class="num">${fmtRate(r.price_ok, r.tries)}</td>
+    <td class="num">${fmtRate(r.desc_ok, r.tries)}</td>
+    <td class="num">${fmtRate(r.videos_ok, r.tries)}</td>
+    <td>${r.lastOk?'✅':'❌'} ${fmtDate(r.lastAt)}</td>
+  </tr>`).join('');
+  body.innerHTML = `<table class="stats"><thead><tr>
+    <th>ブランド</th><th>ホスト</th><th class="num">試行</th>
+    <th class="num">画像</th><th class="num">価格</th><th class="num">説明</th><th class="num">動画</th>
+    <th>最終</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function statsToCsv(){
+  const list = Object.values(loadStats()).sort((a,b)=> (b.lastAt||'').localeCompare(a.lastAt||''));
+  const head = ['brand','host','tries','images_ok','price_ok','desc_ok','videos_ok','first_at','last_at','last_ok'];
+  const esc = s=> { const t=String(s??''); return /[",\n]/.test(t)? '"'+t.replace(/"/g,'""')+'"' : t; };
+  const lines = [head.join(',')].concat(list.map(r=> head.map(k=> esc(r[k])).join(',')));
+  return lines.join('\n');
+}
+$('#statsCsv').onclick = ()=>{
+  const csv = statsToCsv();
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`246_brand_stats_${todayYmd()}.csv`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+};
+$('#statsClear').onclick = ()=>{ if(confirm('集計データをすべてリセットします。よろしいですか？')){ localStorage.removeItem(STATS_KEY); renderStats(); } };
+renderStats();
 function openAllUrls(list){
   if(!list.length){ fetchMsg.className='msg err'; fetchMsg.textContent='開けるURLがありません'; return 0; }
   let opened=0, blocked=0;
@@ -221,14 +311,16 @@ async function doFetch(){
     try{
       const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
       const d = await r.json();
+      recordScrape(pageUrl, d, !!d.error);
       const vids=(d.videos||[]).map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true }));
       if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
       sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null,
         images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })),
         videos:vids });
-    }catch(e){ ng++; sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
+    }catch(e){ ng++; recordScrape(pageUrl, null, true); sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
   }
+  renderStats();
   fetchBtn.disabled=false;
   const total = sources.reduce((a,s)=>a+s.images.length,0);
   fetchMsg.className = ng? 'msg err':'msg ok';
