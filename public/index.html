@@ -76,18 +76,18 @@
   <div class="controls">
     <div class="field">
       <label>出力する画像</label>
-      <div style="display:flex;gap:14px;padding:6px 0">
-        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outOrig" checked> 元画像（無加工）</label>
-        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outSquare" checked> 正方形化</label>
+      <div style="display:flex;gap:14px;padding:6px 0;flex-wrap:wrap">
+        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outOrig" checked> 元画像</label>
+        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outSqNative" checked> 元サイズで正方形化（squareフォルダ）</label>
+        <label style="font-size:13px;color:var(--fg)"><input type="checkbox" id="outSqSized" checked> 指定サイズで正方形化</label>
       </div>
     </div>
     <div class="field">
-      <label>正方形サイズ</label>
+      <label>指定サイズ</label>
       <select id="sizeMode">
-        <option value="1080" selected>1080 × 1080</option>
-        <option value="long">長辺に合わせる（拡大なし）</option>
-        <option value="1200">1200 × 1200</option>
-        <option value="2000">2000 × 2000</option>
+        <option value="1080" selected>1080</option>
+        <option value="1200">1200</option>
+        <option value="2000">2000</option>
         <option value="custom">カスタム…</option>
       </select>
     </div>
@@ -106,7 +106,8 @@
     <div class="field">
       <label>ファイル名</label>
       <select id="nameMode">
-        <option value="date" selected>日付＋連番（YYYYMMDD_01）</option>
+        <option value="item" selected>商品番号＋ブランド＋連番（01-jacquemus-01）</option>
+        <option value="date">日付＋連番（YYYYMMDD_01）</option>
         <option value="product">商品名＋連番</option>
         <option value="orig">元画像名</option>
       </select>
@@ -186,7 +187,7 @@
 const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
 const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
-const outOrig=$('#outOrig'), outSquare=$('#outSquare'), incVideo=$('#incVideo');
+const outOrig=$('#outOrig'), outSqNative=$('#outSqNative'), outSqSized=$('#outSqSized'), incVideo=$('#incVideo');
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount'), genAllBtn=$('#genAllBtn');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -197,7 +198,7 @@ let items = [];    // squared results {name, base, blob, url, size}
 
 sizeMode.onchange = ()=>{ customWrap.style.display = sizeMode.value==='custom'?'flex':'none'; reprocessAll(); };
 [customSize,bgMode].forEach(el=> el.onchange = reprocessAll);
-[outOrig,outSquare].forEach(el=> el.onchange = reprocessAll);
+[outOrig,outSqNative,outSqSized].forEach(el=> el.onchange = reprocessAll);
 fmt.onchange = ()=>{ qWrap.style.opacity = fmt.value==='image/jpeg'?'1':'.4'; reprocessAll(); };
 quality.oninput = ()=> qVal.textContent = quality.value;
 quality.onchange = reprocessAll;
@@ -489,8 +490,8 @@ function sampleEdgeColor(sctx,nw){
     return `rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`;
   }catch(e){ return '#ffffff'; }
 }
-function processImage(img){
-  const w=img.naturalWidth, h=img.naturalHeight, size=targetSize(w,h);
+function processImage(img, forcedSize){
+  const w=img.naturalWidth, h=img.naturalHeight, size = (forcedSize!=null? forcedSize : targetSize(w,h));
   const scale=Math.min(size/w,size/h);
   const nw=Math.max(1,Math.round(w*scale)), nh=Math.max(1,Math.round(h*scale));
   const scaled=document.createElement('canvas'); scaled.width=nw; scaled.height=nh;
@@ -543,20 +544,30 @@ function videoExt(src, blob){
   if(t.includes('quicktime')) return 'mov';
   return 'mp4';
 }
+// ブランド識別子（ASCII小文字）: URLホスト優先、フォールバックは商品名スラッグ
+function itemBrand(s){
+  let b='';
+  if(s && s.pageUrl){ const h=hostOf(s.pageUrl); if(h) b=brandLabel(h); }
+  if(!b) b = slugifyTitle((s&&s.title)||'product');
+  return String(b).toLowerCase().replace(/[^a-z0-9\-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'product';
+}
 // ファイル名に使えない文字を除去（Windows/Mac両対応）。日本語・スペースは保持。
 function slugifyTitle(t){ return (t||'image').replace(/[\/\\:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim() || 'image'; }
 
 // ファイル名の共通ベース（拡張子とバリアント接尾辞を除く）
 function makeBaseName(job, ymd, globalNo, seen){
   let core;
-  if(nameMode.value==='date'){
+  if(nameMode.value==='item'){
+    // 商品番号-ブランド-連番（例: 01-jacquemus-01）
+    core = `${String(job.productNo).padStart(2,'0')}-${itemBrand(job.prod)}-${String(job.idx).padStart(2,'0')}`;
+  } else if(nameMode.value==='date'){
     core = `${ymd}_${String(globalNo).padStart(2,'0')}`;
   } else if(nameMode.value==='orig'){
     core = job.im.local ? (job.im.name||'image').replace(/\.[^.]+$/,'') : baseName(job.im.remoteSrc);
   } else {
     core = `${slugifyTitle(job.title)}-${String(job.idx).padStart(2,'0')}`;
   }
-  let base = urlNum.value==='on' && nameMode.value!=='date'
+  let base = urlNum.value==='on' && nameMode.value!=='date' && nameMode.value!=='item'
     ? `${String(job.productNo).padStart(2,'0')}_${core}` : core;
   if(seen[base]) base=base+'_'+(++seen[base]); else seen[base]=1;
   return base;
@@ -567,15 +578,17 @@ async function squareSelected(){
   const jobs=[]; let productNo=0;
   sources.forEach(s=>{
     const selImgs=s.images.filter(im=>im.sel);
-    if(!selImgs.length && !(incVideo.value==='on' && s.videos && s.videos.length)) return;
+    const hasVid = incVideo.value==='on' && s.videos && s.videos.length;
+    if(!selImgs.length && !hasVid) return;
     productNo++;
+    s._productNo = productNo; // 後のZIP生成でも同じ番号を使えるように保存
     selImgs.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s, kind:'image' }));
-    if(incVideo.value==='on' && s.videos){
+    if(hasVid){
       s.videos.forEach((im,i)=> jobs.push({ im, title:s.title, idx:i+1, productNo, prod:s, kind:'video' }));
     }
   });
   if(!jobs.length) return;
-  if(!outOrig.checked && !outSquare.checked){ alert('「出力する画像」で少なくとも1つ選択してください'); return; }
+  if(!outOrig.checked && !outSqNative.checked && !outSqSized.checked){ alert('「出力する画像」で少なくとも1つ選択してください'); return; }
   squareBtn.disabled=true; squareBtn.innerHTML='<span class="spin"></span>処理中…';
   const seen={}, ymd=todayYmd();
   let globalNo = 0;
@@ -586,23 +599,36 @@ async function squareSelected(){
         const blob = await fetchOriginalBlob(job.im);
         const ext = videoExt(job.im.remoteSrc||'', blob);
         const base = makeBaseName(job, ymd, globalNo, seen);
-        items.push({ name:`${base}_video.${ext}`, base, ext, kind:'video', im:job.im, blob, url:URL.createObjectURL(blob), sizeLabel:'動画', prod:job.prod });
+        const name = `${base}-video.${ext}`;
+        items.push({ name, base, ext, kind:'video', im:job.im, blob, url:URL.createObjectURL(blob), sizeLabel:'動画', zipPath:name, prod:job.prod });
         continue;
       }
       const img=await loadImageFromUrl(job.im.url);
       const base = makeBaseName(job, ymd, globalNo, seen);
-      // ① 元画像（無加工）
+      // ① 元画像（無加工・ルート直下）
       if(outOrig.checked){
         const blob = await fetchOriginalBlob(job.im);
         const ext = origExt(job.im, blob);
-        items.push({ name:`${base}_orig.${ext}`, base, ext, kind:'orig', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size:img.naturalWidth, sizeLabel:`${img.naturalWidth}×${img.naturalHeight}`, prod:job.prod });
+        const name = `${base}.${ext}`;
+        items.push({ name, base, ext, kind:'orig', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size:img.naturalWidth, sizeLabel:`${img.naturalWidth}×${img.naturalHeight}`, zipPath:name, prod:job.prod });
       }
-      // ② 正方形化
-      if(outSquare.checked){
-        const {canvas,size}=processImage(img);
+      // ② 元サイズで正方形化（square/ フォルダ）
+      if(outSqNative.checked){
+        const nativeSize = Math.max(img.naturalWidth, img.naturalHeight);
+        const {canvas}=processImage(img, nativeSize);
         const blob=await exportBlob(canvas);
         const ext=fmt.value==='image/png'?'png':'jpg';
-        items.push({ name:`${base}_${size}.${ext}`, base, ext, kind:'sq', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size, sizeLabel:`${size}×${size}`, prod:job.prod });
+        const name = `${base}-square.${ext}`;
+        items.push({ name, base, ext, kind:'sq_native', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size:nativeSize, sizeLabel:`${nativeSize}×${nativeSize}（元サイズ）`, zipPath:`square/${name}`, prod:job.prod });
+      }
+      // ③ 指定サイズで正方形化（<size>/ フォルダ）
+      if(outSqSized.checked){
+        const size = targetSize(img.naturalWidth, img.naturalHeight);
+        const {canvas}=processImage(img, size);
+        const blob=await exportBlob(canvas);
+        const ext=fmt.value==='image/png'?'png':'jpg';
+        const name = `${base}-${size}.${ext}`;
+        items.push({ name, base, ext, kind:'sq_sized', srcImg:img, im:job.im, blob, url:URL.createObjectURL(blob), size, sizeLabel:`${size}×${size}`, zipPath:`${size}/${name}`, prod:job.prod });
       }
     }catch(e){ /* skip broken */ }
   }
@@ -611,14 +637,25 @@ async function squareSelected(){
 }
 async function reprocessAll(){
   if(!items.length) return;
-  // 設定変更時：正方形版のみ再エンコード。元画像・動画はそのまま。
+  // 設定変更時：正方形版(sq_native / sq_sized)のみ再エンコード。元画像・動画はそのまま。
   for(const it of items){
-    if(it.kind!=='sq') continue;
+    if(it.kind!=='sq_native' && it.kind!=='sq_sized') continue;
     URL.revokeObjectURL(it.url);
-    const {canvas,size}=processImage(it.srcImg); it.size=size; it.sizeLabel=`${size}×${size}`;
+    const w=it.srcImg.naturalWidth, h=it.srcImg.naturalHeight;
+    const size = it.kind==='sq_native' ? Math.max(w,h) : targetSize(w,h);
+    const {canvas}=processImage(it.srcImg, size);
     it.blob=await exportBlob(canvas);
     it.ext = fmt.value==='image/png'?'png':'jpg';
-    it.name=`${it.base}_${size}.${it.ext}`;
+    it.size = size;
+    if(it.kind==='sq_native'){
+      it.sizeLabel=`${size}×${size}（元サイズ）`;
+      it.name=`${it.base}-square.${it.ext}`;
+      it.zipPath=`square/${it.name}`;
+    } else {
+      it.sizeLabel=`${size}×${size}`;
+      it.name=`${it.base}-${size}.${it.ext}`;
+      it.zipPath=`${size}/${it.name}`;
+    }
     it.url=URL.createObjectURL(it.blob);
   }
   renderOut();
@@ -638,12 +675,15 @@ function renderOut(){
     } else if(it.kind==='orig'){
       badge = '<span class="badge" style="color:#31c48d">原本</span>';
       thumb = `<img src="${it.url}">`;
+    } else if(it.kind==='sq_native'){
+      badge = '<span class="badge" style="color:#98a2b3">square（元サイズ）</span>';
+      thumb = `<img src="${it.url}">`;
     } else {
-      badge = '<span class="badge" style="color:#98a2b3">正方形</span>';
+      badge = `<span class="badge" style="color:#98a2b3">${it.size||''}</span>`;
       thumb = `<img src="${it.url}">`;
     }
     c.innerHTML=`<div class="thumb">${badge}${thumb}</div>
-      <div class="meta"><div class="name" title="${it.name}">${it.name}</div>
+      <div class="meta"><div class="name" title="${it.zipPath||it.name}">${it.zipPath||it.name}</div>
       <div class="dim">${it.sizeLabel||''}</div>
       <a href="${it.url}" download="${it.name}">⤓ ダウンロード</a></div>`;
     grid.appendChild(c);
@@ -651,26 +691,24 @@ function renderOut(){
 }
 async function downloadZip(){
   // 構造:
-  //   /<商品名>/YYYYMMDD_NN_<size>.jpg   ← 1080等の正方形版はフォルダ内
-  //   YYYYMMDD_NN_orig.<ext>              ← 元画像はフラット
-  //   YYYYMMDD_NN_video.mp4               ← 動画もフラット
-  //   NN_<商品名>.txt                     ← 商品テキストもフラット
+  //   NN-<brand>-XX.<ext>            ← 元画像（フラット）
+  //   NN-<brand>-XX-video.mp4        ← 動画（フラット）
+  //   NN-<brand>.txt                 ← 商品テキスト（フラット）
+  //   square/NN-<brand>-XX-square.jpg   ← 元サイズ正方形
+  //   1080/NN-<brand>-XX-1080.jpg       ← 指定サイズ正方形
   const zip=new JSZip();
   let productNo=0, added=0;
   for(const s of sources){
-    if(!(s.title || (s.images&&s.images.length))) continue;
-    productNo++;
-    const slug=slugifyTitle(s.title);
-    const folder=`${String(productNo).padStart(2,'0')}_${slug}`;
     const my=items.filter(it=>it.prod===s);
-    for(const it of my){
-      if(it.kind==='sq'){ zip.file(`${folder}/${it.name}`, it.blob); }
-      else { zip.file(it.name, it.blob); } // orig / video はフラット
-      added++;
-    }
-    if(s.gen || s.description || s.price){ zip.file(`${folder}.txt`, productText(s)); added++; }
+    const hasText = s.gen || s.description || s.price;
+    if(!my.length && !hasText) continue;
+    productNo++;
+    const num = (s._productNo!=null? s._productNo : productNo);
+    const brand = itemBrand(s);
+    for(const it of my){ zip.file(it.zipPath || it.name, it.blob); added++; }
+    if(hasText){ zip.file(`${String(num).padStart(2,'0')}-${brand}.txt`, productText(s)); added++; }
   }
-  if(added===0){ items.forEach(it=> zip.file(it.name, it.blob)); }
+  if(added===0){ items.forEach(it=> zip.file(it.zipPath||it.name, it.blob)); }
   const blob=await zip.generateAsync({type:'blob'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`246_${todayYmd()}.zip`; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
