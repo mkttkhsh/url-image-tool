@@ -650,6 +650,11 @@ function renderOut(){
   });
 }
 async function downloadZip(){
+  // 構造:
+  //   /<商品名>/YYYYMMDD_NN_<size>.jpg   ← 1080等の正方形版はフォルダ内
+  //   YYYYMMDD_NN_orig.<ext>              ← 元画像はフラット
+  //   YYYYMMDD_NN_video.mp4               ← 動画もフラット
+  //   NN_<商品名>.txt                     ← 商品テキストもフラット
   const zip=new JSZip();
   let productNo=0, added=0;
   for(const s of sources){
@@ -658,9 +663,12 @@ async function downloadZip(){
     const slug=slugifyTitle(s.title);
     const folder=`${String(productNo).padStart(2,'0')}_${slug}`;
     const my=items.filter(it=>it.prod===s);
-    // 書き出したファイル名(it.name)をそのまま採用（種別サフィックス _orig/_1080/_video 付き）
-    my.forEach(it=>{ zip.file(`${folder}/${it.name}`, it.blob); added++; });
-    if(s.gen || s.description || s.price){ zip.file(`${folder}/product.txt`, productText(s)); added++; }
+    for(const it of my){
+      if(it.kind==='sq'){ zip.file(`${folder}/${it.name}`, it.blob); }
+      else { zip.file(it.name, it.blob); } // orig / video はフラット
+      added++;
+    }
+    if(s.gen || s.description || s.price){ zip.file(`${folder}.txt`, productText(s)); added++; }
   }
   if(added===0){ items.forEach(it=> zip.file(it.name, it.blob)); }
   const blob=await zip.generateAsync({type:'blob'});
