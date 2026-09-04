@@ -350,17 +350,32 @@ function renderSources(){
       + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'');
     card.appendChild(head);
 
-    // 公式説明（原文・折りたたみ）
-    if(s.description){
-      const det=document.createElement('details'); det.className='orig';
-      det.innerHTML=`<summary>公式説明（原文）</summary><div class="body">${esc(s.description)}</div>`;
-      card.appendChild(det);
-    }
+    // 公式説明（原文）— 常に編集可能。取れなかった場合は貼り付けを促すプレースホルダ
+    const origWrap=document.createElement('div'); origWrap.className='genfield';
+    const has = !!(s.description && s.description.trim());
+    const origLabel = has
+      ? `公式説明（原文・編集可） <span class="charc">${s.description.length}字</span>`
+      : `<span style="color:var(--warn)">⚠ 公式説明が取れませんでした</span> — ここに貼り付けると生成の精度が上がります`;
+    origWrap.innerHTML = `<label>${origLabel}</label>
+      <textarea class="desc" style="min-height:70px" placeholder="商品ページから公式説明文をコピー＆ペースト（英語原文でもOK・である調で和訳生成されます）">${esc(s.description||'')}</textarea>`;
+    const origTa = origWrap.querySelector('textarea');
+    origTa.oninput = ()=>{
+      s.description = origTa.value;
+      const cc = origWrap.querySelector('.charc');
+      if(cc) cc.textContent = `${origTa.value.length}字`;
+      updateGenBtnLabel();
+    };
+    card.appendChild(origWrap);
 
     // テキスト生成ツール
     const tools=document.createElement('div'); tools.className='gentools';
     const genBtn=document.createElement('button'); genBtn.className='mini';
-    genBtn.textContent = s.gen? 'テキスト再生成' : 'テキスト生成（である調＋PR）';
+    function updateGenBtnLabel(){
+      const hasNow = !!(s.description && s.description.trim());
+      genBtn.textContent = s.gen ? 'テキスト再生成' : (hasNow ? 'テキスト生成（である調＋PR）' : '説明文を貼ってから生成');
+      genBtn.disabled = !hasNow && !s.title;
+    }
+    updateGenBtnLabel();
     genBtn.onclick=()=>generateText(si, genBtn);
     tools.appendChild(genBtn);
     card.appendChild(tools);
