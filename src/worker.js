@@ -170,7 +170,7 @@ function stripHtml(s) {
   return decodeHtml(String(s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
-// である調説明文＋PR文を Gemini で生成
+// である調説明文＋PR文（+ 見出し）を Gemini で生成
 async function handleGenerate(request, env) {
   if (request.method !== 'POST') return json({ error: 'POST を使用してください' }, 405);
   if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY が未設定です（wrangler secret put で登録してください）' }, 500);
@@ -179,17 +179,18 @@ async function handleGenerate(request, env) {
   const title = (b.title || '').toString().slice(0, 300);
   const price = (b.price || '').toString().slice(0, 60);
   const description = (b.description || '').toString().slice(0, 4000);
+  const category = (['product','hotel','cafe','restaurant'].includes(b.category) ? b.category : 'product');
   if (!title && !description) return json({ error: '商品名か説明文が必要です' }, 400);
 
-  const prompt = buildPrompt(title, price, description);
+  const needsHeading = category !== 'product';
+  const prompt = needsHeading ? buildPlacePrompt(title, description, category) : buildProductPrompt(title, price, description);
   const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+  const schema = needsHeading
+    ? { type: 'object', properties: { heading: { type: 'string' }, desc: { type: 'string' }, pr: { type: 'string' } }, required: ['heading', 'desc', 'pr'] }
+    : { type: 'object', properties: { desc: { type: 'string' }, pr: { type: 'string' } }, required: ['desc', 'pr'] };
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.7,
-      responseMimeType: 'application/json',
-      responseSchema: { type: 'object', properties: { desc: { type: 'string' }, pr: { type: 'string' } }, required: ['desc', 'pr'] },
-    },
+    generationConfig: { temperature: 0.7, responseMimeType: 'application/json', responseSchema: schema },
   };
   let r;
   try {
@@ -201,10 +202,12 @@ async function handleGenerate(request, env) {
   let out;
   try { out = JSON.parse(d.candidates[0].content.parts[0].text); }
   catch (e) { return json({ error: '生成結果の解析に失敗しました' }, 502); }
-  return json({ desc: (out.desc || '').trim(), pr: (out.pr || '').trim() });
+  const result = { desc: (out.desc || '').trim(), pr: (out.pr || '').trim() };
+  if (needsHeading) result.heading = (out.heading || '').trim();
+  return json(result);
 }
 
-function buildPrompt(title, price, description) {
+function buildProductPrompt(title, price, description) {
   return `# 目的
 与えられた「商品情報」をもとに、セレクトショップ「246（246select.com）」の掲載用テキストを作成する。
 出力は「一覧ページ用キャッチコピー」と「詳細ページ用説明文」の2種類。
@@ -246,6 +249,54 @@ function buildPrompt(title, price, description) {
 
 # 出力例（200字仕様に拡張したイメージ）
 {"pr": "編み込み風レザーにゴールドの立体クラスプが映えるクラッチ。", "desc": "編み込みエフェクトを施したゴートスキン製のテイクアウェイクラッチ「Rond Carré」。ゴールドトーンの持ち手にはスフィア（球体）とキューブ（立方体）のクラスプを配し、マグネット開閉で広げて中身を取り出せる構造に仕立てた。内側にカードポケットとコットンライニングを備え、ゴールドのロゴと金具が華やかさを添えるイタリア製の一品だ。（171文字）"}`;
+}
+
+function buildPlacePrompt(title, description, category) {
+  const catJa = category === 'hotel' ? 'ホテル' : category === 'cafe' ? 'カフェ' : 'レストラン';
+  const focus = category === 'hotel'
+    ? '立地・建築や外観 → 客室・パブリックスペース → 料理・体験 → 訪れる価値'
+    : category === 'cafe'
+      ? '立地・雰囲気 → 内装・空間 → メニュー・過ごし方 → 訪れる価値'
+      : '立地・店構え → シェフ／料理ジャンル → 名物メニュー・体験 → 訪れる価値';
+  const headingHint = category === 'hotel'
+    ? 'ホテルの個性・立地・世界観を凝縮した一文（例：「アルプスの山懐に抱かれた、静謐なるオーベルジュ」）'
+    : category === 'cafe'
+      ? 'カフェの個性・立地・雰囲気を凝縮した一文（例：「銀座の裏路地に佇む、大人のための和み珈琲店」）'
+      : 'レストランの個性・料理・世界観を凝縮した一文（例：「京町家で味わう、ミシュラン一つ星の革新的フレンチ」）';
+  return `# 目的
+与えられた「${catJa}情報」をもとに、セレクトショップ「246（246select.com）」の${catJa}紹介ページ用テキストを作成する。
+出力は「見出し」「詳細説明文」「一覧ページ用キャッチコピー」の3種類。
+
+# 役割・トーン＆マナー
+- 上質な旅・生活情報誌の編集者として、事実に基づき洗練された落ち着いたトーンで執筆する。
+- 語尾・文体：「〜だ。」「〜である。」に加え、体言止め・名詞句止め（「〜佇まい。」「〜ロケーション。」）を自然に織り交ぜる。ですます調は使わない。
+- 誇張・主観的絶賛（「唯一無二」「究極」「至高」）や過度な形容詞は避け、具体名・数字・地名等の事実で語る。
+- 推測で断定しない。原文にない情報は書かない。英語原文は忠実に和訳し要点を整える。
+
+# 入力データ
+店名／施設名：${title || '(不明)'}
+公式紹介文：${description || '(取得できず)'}
+
+# 出力ルール
+
+1. 【見出し】（JSONキー: heading）
+- 文字数：**30文字前後（厳守：25〜35字）**
+- ${headingHint}
+- 文字数の括弧書きは付けない。本文のみを出力する。
+- キャッチコピー（pr）とは重複しない別の切り口・語彙で書く。
+
+2. 【詳細説明文】（JSONキー: desc）
+- 文字数：**200文字程度（180〜220字）**
+- 構成の順序: ${focus}、を3〜4文で。
+- 文末に「（〇〇文字）」と正確な文字数を必ず記載する。
+
+3. 【一覧ページ用キャッチコピー】（JSONキー: pr）
+- 文字数：20〜30字
+- 施設の魅力を一文で凝縮。見出しとは違う角度で。
+
+# 出力形式
+以下のJSONで出力する:
+{"heading": "<見出し25〜35字>", "pr": "<キャッチ20〜30字>", "desc": "<説明文180〜220字>（〇〇文字）"}`;
 }
 
 function extractFromHtml(html, u) {

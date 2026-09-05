@@ -227,6 +227,18 @@ function brandLabel(host){
   if(p.length>=3 && p[p.length-2].length<=3 && p[p.length-1].length<=3) return p[p.length-3];
   return p[p.length-2] || host;
 }
+// URLパスからカテゴリ推定（246select.com は /cafes/ /hotels/ /restaurants/ 等）
+function detectCategory(pageUrl){
+  if(!pageUrl) return 'product';
+  try{
+    const p = new URL(pageUrl).pathname.toLowerCase();
+    if(/\/(hotels?|ryokan|inns?|resorts?|onsen)\b/.test(p)) return 'hotel';
+    if(/\/(cafes?|coffee|kissa)\b/.test(p)) return 'cafe';
+    if(/\/(restaurants?|dining|bars?|bistros?|izakaya|patisseries?|kitchen)\b/.test(p)) return 'restaurant';
+  }catch(e){}
+  return 'product';
+}
+const CAT_LABEL = { product:'商品', hotel:'ホテル', cafe:'カフェ', restaurant:'レストラン' };
 function recordScrape(pageUrl, d, hadError){
   const host = hostOf(pageUrl); if(!host) return;
   const store = loadStats();
@@ -314,9 +326,10 @@ async function doFetch(){
       const d = await r.json();
       recordScrape(pageUrl, d, !!d.error);
       const vids=(d.videos||[]).map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true }));
-      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, gen:null, error:d.error||'画像が見つかりませんでした'}); continue; }
+      const cat = detectCategory(pageUrl);
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, gen:null, category:cat, error:d.error||'画像が見つかりませんでした'}); continue; }
       ok++;
-      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null,
+      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null, category:cat,
         images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })),
         videos:vids });
     }catch(e){ ng++; recordScrape(pageUrl, null, true); sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
@@ -367,12 +380,24 @@ function renderSources(){
     };
     card.appendChild(origWrap);
 
-    // テキスト生成ツール
+    // テキスト生成ツール（カテゴリ切替＋生成ボタン）
     const tools=document.createElement('div'); tools.className='gentools';
+    if(!s.category) s.category='product';
+    const catSel=document.createElement('select');
+    catSel.style.cssText='background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px';
+    for(const [k,v] of Object.entries(CAT_LABEL)){
+      const o=document.createElement('option'); o.value=k; o.textContent=v; if(k===s.category) o.selected=true; catSel.appendChild(o);
+    }
+    catSel.onchange=()=>{ s.category=catSel.value; updateGenBtnLabel(); };
+    const catLabel=document.createElement('span'); catLabel.style.cssText='font-size:12px;color:var(--muted)'; catLabel.textContent='カテゴリ:';
+    tools.appendChild(catLabel); tools.appendChild(catSel);
+
     const genBtn=document.createElement('button'); genBtn.className='mini';
     function updateGenBtnLabel(){
       const hasNow = !!(s.description && s.description.trim());
-      genBtn.textContent = s.gen ? 'テキスト再生成' : (hasNow ? 'テキスト生成（である調＋PR）' : '説明文を貼ってから生成');
+      const needsHead = s.category !== 'product';
+      const suffix = needsHead ? '（見出し＋説明＋PR）' : '（である調＋PR）';
+      genBtn.textContent = s.gen ? 'テキスト再生成' : (hasNow ? 'テキスト生成'+suffix : '説明文を貼ってから生成');
       genBtn.disabled = !hasNow && !s.title;
     }
     updateGenBtnLabel();
@@ -382,9 +407,15 @@ function renderSources(){
 
     if(s.gen){
       const gw=document.createElement('div'); gw.className='genwrap';
+      const hd = s.gen.heading || '';
+      const hasHead = s.category !== 'product';
       gw.innerHTML=`
+        ${hasHead ? `<div class="genfield">
+          <label>見出し（${CAT_LABEL[s.category]||''}・30字前後） <span class="charc" data-for="heading">${hd.length}字</span></label>
+          <textarea class="pr" data-si="${si}" data-k="heading">${esc(hd)}</textarea>
+        </div>` : ''}
         <div class="genfield">
-          <label>PR文 <span class="charc" data-for="pr">${s.gen.pr.length}字</span></label>
+          <label>PR文（一覧用キャッチ） <span class="charc" data-for="pr">${s.gen.pr.length}字</span></label>
           <textarea class="pr" data-si="${si}" data-k="pr">${esc(s.gen.pr)}</textarea>
         </div>
         <div class="genfield">
@@ -392,6 +423,7 @@ function renderSources(){
           <textarea class="desc" data-si="${si}" data-k="desc">${esc(s.gen.desc)}</textarea>
         </div>
         <div class="btnrow">
+          ${hasHead ? '<button class="ghost mini" data-copy="heading">見出しをコピー</button>' : ''}
           <button class="ghost mini" data-copy="pr">PR文をコピー</button>
           <button class="ghost mini" data-copy="desc">説明文をコピー</button>
           <button class="ghost mini" data-copy="txt">product.txt形式でコピー</button>
@@ -433,10 +465,10 @@ async function generateText(si, btn){
   const old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
   try{
     const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({title:s.title, price:s.price, description:s.description})});
+      body:JSON.stringify({title:s.title, price:s.price, description:s.description, category:s.category||'product'})});
     const d=await r.json();
     if(d.error){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+d.error); return; }
-    s.gen={ desc:d.desc||'', pr:d.pr||'' };
+    s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'' };
     renderSources();
   }catch(e){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+e); }
 }
@@ -448,8 +480,8 @@ async function genAll(){
     genAllBtn.innerHTML=`<span class="spin"></span>生成中… ${++n}/${targets.length}`;
     try{
       const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({title:s.title, price:s.price, description:s.description})});
-      const d=await r.json(); if(!d.error) s.gen={ desc:d.desc||'', pr:d.pr||'' };
+        body:JSON.stringify({title:s.title, price:s.price, description:s.description, category:s.category||'product'})});
+      const d=await r.json(); if(!d.error) s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'' };
     }catch(e){}
   }
   genAllBtn.textContent=old; genAllBtn.disabled=false; renderSources();
@@ -457,16 +489,22 @@ async function genAll(){
 
 function productText(s){
   const L=[];
-  L.push('【WordPress投稿タイトル】'); L.push(s.title||''); L.push('');
+  const catLabel = CAT_LABEL[s.category||'product'] || '商品';
+  L.push(`【WordPress投稿タイトル（${catLabel}）】`); L.push(s.title||''); L.push('');
   if(s.price){ L.push('【価格】'); L.push(s.price); L.push(''); }
-  if(s.gen){ L.push('【PR文（30字前後）】'); L.push(s.gen.pr||''); L.push('');
-    L.push('【商品説明（である調）】'); L.push(s.gen.desc||''); L.push(''); }
-  if(s.description){ L.push('【商品説明（公式原文）】'); L.push(s.description); L.push(''); }
+  if(s.gen){
+    if(s.gen.heading){ L.push(`【見出し（${catLabel}・30字前後）】`); L.push(s.gen.heading); L.push(''); }
+    L.push('【PR文（一覧用キャッチ）】'); L.push(s.gen.pr||''); L.push('');
+    L.push(`【${catLabel}説明（である調）】`); L.push(s.gen.desc||''); L.push(''); }
+  if(s.description){ L.push('【公式説明（原文）】'); L.push(s.description); L.push(''); }
   L.push('【ショッピングURL】'); L.push(s.pageUrl||'');
   return L.join('\n');
 }
 async function copyProduct(s, kind, btn){
-  const text = kind==='pr'? (s.gen&&s.gen.pr||'') : kind==='desc'? (s.gen&&s.gen.desc||'') : productText(s);
+  const text = kind==='heading' ? (s.gen&&s.gen.heading||'')
+             : kind==='pr' ? (s.gen&&s.gen.pr||'')
+             : kind==='desc' ? (s.gen&&s.gen.desc||'')
+             : productText(s);
   try{ await navigator.clipboard.writeText(text); const o=btn.textContent; btn.textContent='コピーしました ✓'; setTimeout(()=>btn.textContent=o,1200); }
   catch(e){ alert('コピーできませんでした'); }
 }
