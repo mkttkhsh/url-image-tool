@@ -170,20 +170,49 @@ function stripHtml(s) {
   return decodeHtml(String(s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
-// である調説明文＋PR文（+ 見出し）を Gemini で生成
+// 掲載文（説明・PR・見出し）を Gemini または Claude で生成
 async function handleGenerate(request, env) {
   if (request.method !== 'POST') return json({ error: 'POST を使用してください' }, 405);
-  if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY が未設定です（wrangler secret put で登録してください）' }, 500);
   let b;
   try { b = await request.json(); } catch (e) { return json({ error: 'リクエストが不正です' }, 400); }
   const title = (b.title || '').toString().slice(0, 300);
   const price = (b.price || '').toString().slice(0, 60);
-  const description = (b.description || '').toString().slice(0, 4000);
+  const description = (b.description || '').toString().slice(0, 6000);
   const category = (['product','hotel','cafe','restaurant'].includes(b.category) ? b.category : 'product');
+  const provider = (b.provider === 'claude') ? 'claude' : 'gemini';
+  const tone = String(b.tone || '').slice(0, 40); // 標準 | ミニマル寄り | モード寄り | 詩的 | ストリート | クラシック
+  const freeform = String(b.freeform || '').slice(0, 400); // ユーザーの自由指示（例：「もっと〇〇に」）
+  const avoidWords = Array.isArray(b.avoidWords) ? b.avoidWords.slice(0, 80).map(w => String(w).slice(0, 20)) : [];
+  const floor = String(b.floor || '').slice(0, 60); // 掲載フロア（TSV入力時）
+  const itemName = String(b.itemName || '').slice(0, 60); // アイテム名（TSV入力時）
   if (!title && !description) return json({ error: '商品名か説明文が必要です' }, 400);
 
   const needsHeading = category !== 'product';
-  const prompt = needsHeading ? buildPlacePrompt(title, description, category) : buildProductPrompt(title, price, description);
+  const prompt = needsHeading
+    ? buildPlacePrompt({ title, description, category, tone, freeform, avoidWords })
+    : buildProductPrompt({ title, price, description, tone, freeform, avoidWords, floor, itemName });
+
+  // provider 分岐
+  try {
+    let out;
+    if (provider === 'claude') {
+      if (!env.ANTHROPIC_API_KEY) return json({ error: 'ANTHROPIC_API_KEY が未設定です（wrangler secret put ANTHROPIC_API_KEY で登録）' }, 500);
+      out = await callClaude(prompt, needsHeading, env);
+    } else {
+      if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY が未設定です' }, 500);
+      out = await callGemini(prompt, needsHeading, env);
+    }
+    const result = { desc: (out.desc || '').trim(), pr: (out.pr || '').trim(), provider };
+    if (needsHeading) result.heading = (out.heading || '').trim();
+    // 公式仕様の運用にあわせ、末尾の「（〇〇文字）」は自動除去
+    result.desc = result.desc.replace(/\s*[（(]\s*\d+\s*文字\s*[)）]\s*$/, '').trim();
+    return json(result);
+  } catch (e) {
+    return json({ error: String(e && e.message || e) }, 502);
+  }
+}
+
+async function callGemini(prompt, needsHeading, env) {
   const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
   const schema = needsHeading
     ? { type: 'object', properties: { heading: { type: 'string' }, desc: { type: 'string' }, pr: { type: 'string' } }, required: ['heading', 'desc', 'pr'] }
@@ -192,66 +221,111 @@ async function handleGenerate(request, env) {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.7, responseMimeType: 'application/json', responseSchema: schema },
   };
-  let r;
-  try {
-    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { return json({ error: 'Gemini 接続失敗: ' + String(e) }, 502); }
-  if (!r.ok) { const t = await r.text(); return json({ error: 'Gemini エラー: ' + t.slice(0, 240) }, 502); }
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { const t = await r.text(); throw new Error('Gemini エラー: ' + t.slice(0, 240)); }
   const d = await r.json();
-  let out;
-  try { out = JSON.parse(d.candidates[0].content.parts[0].text); }
-  catch (e) { return json({ error: '生成結果の解析に失敗しました' }, 502); }
-  const result = { desc: (out.desc || '').trim(), pr: (out.pr || '').trim() };
-  if (needsHeading) result.heading = (out.heading || '').trim();
-  return json(result);
+  return JSON.parse(d.candidates[0].content.parts[0].text);
 }
 
-function buildProductPrompt(title, price, description) {
-  return `# 目的
-与えられた「商品情報」をもとに、セレクトショップ「246（246select.com）」の掲載用テキストを作成する。
-出力は「一覧ページ用キャッチコピー」と「詳細ページ用説明文」の2種類。
+async function callClaude(prompt, needsHeading, env) {
+  const model = env.CLAUDE_MODEL || 'claude-3-5-sonnet-latest';
+  const jsonInstruction = needsHeading
+    ? '\n\n出力は次のJSONのみ。他のテキストや説明・コードフェンスは一切含めるな。\n{"heading":"…","pr":"…","desc":"…"}'
+    : '\n\n出力は次のJSONのみ。他のテキストや説明・コードフェンスは一切含めるな。\n{"pr":"…","desc":"…"}';
+  const body = {
+    model, max_tokens: 1200, temperature: 0.7,
+    system: '日本語のファッション/ライフスタイル編集者として、JSON形式のみで応答する。',
+    messages: [{ role: 'user', content: prompt + jsonInstruction }],
+  };
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error('Claude エラー: ' + t.slice(0, 240)); }
+  const d = await r.json();
+  let text = (d.content && d.content[0] && d.content[0].text || '').trim();
+  // コードフェンス除去
+  const m = text.match(/```(?:json)?\s*([\s\S]+?)```/);
+  if (m) text = m[1].trim();
+  return JSON.parse(text);
+}
 
-# 役割・トーン＆マナー
-- 高級感と洗練された印象を与えるファッション・ライフスタイル系ECのコピーライターとして執筆する。
-- 語尾・文体：「〜だ。」「〜である。」の断定調に加え、**体言止め・名詞句止め**（例：「〜デザイン。」「〜使用。」「〜イタリア製。」）も自然に織り交ぜる。ですます調は使わない。
-- 事実に基づく具体的な特徴（素材、構造、ディテール、サイズ感、原産国、モデル名）を端的に伝える。詩的表現・過度な形容詞・主観的な絶賛（「唯一無二」「至高」等）は避ける。
-- モデル名・コレクション名・特有の技術名は「」で囲む（例：「Rond Carré」「Dior Water Lily」）。
-- 推測で断定しない。原文にない情報は書かない。公式説明が取得できていない場合は、商品名から確実に言える範囲に留める。英語原文は忠実に和訳し要点を整える。
+function toneClause(tone){
+  if(!tone || tone==='標準') return '';
+  return `\n# 表現の方向性\n- 「${tone}」で書く。他の方向は抑え、この方向性を明確に打ち出すこと。`;
+}
+function freeformClause(freeform){
+  if(!freeform || !freeform.trim()) return '';
+  return `\n# 追加指示（ユーザーから）\n${freeform.trim()}`;
+}
+function avoidClause(avoidWords){
+  if(!avoidWords || !avoidWords.length) return '';
+  return `\n# 今回避ける語彙（前の商品で既に使用済み。重複を避けよ）\n${avoidWords.join('、')}`;
+}
+function floorClause(floor){
+  if(!floor) return '';
+  // フロアからトーンヒント
+  let hint = '';
+  if(/LUXURY|HIGHFASHION/i.test(floor)) hint = '（重厚・格調・素材と職人性）';
+  else if(/CONTEMPORARY|STREET/i.test(floor)) hint = '（機能・エッジ・都市的）';
+  else if(/INTERIOR|DIGITAL/i.test(floor)) hint = '（生活文脈・実用・審美）';
+  else if(/BEAUTY|BATH/i.test(floor)) hint = '（感性・香り・肌触り・生活の質）';
+  else if(/KIDS/i.test(floor)) hint = '（親しみ・素材の安心感・遊び心）';
+  else if(/TRAVEL/i.test(floor)) hint = '（体験価値・土地の物語・ロマン）';
+  return `\n# 掲載フロア\n${floor} ${hint}`;
+}
+
+function buildProductPrompt({title, price, description, tone, freeform, avoidWords, floor, itemName}) {
+  return `あなたはリステア創業者・高下ひろあき氏のように、感度の高いファッション・ライフスタイルウェブマガジンの編集者である。
+以下の条件に基づき、商品の魅力を最大限に引き出す文章を2種類作成せよ。
 
 # 入力データ
-ブランド名 / 商品名：${title || '(不明)'}
-アイテムカテゴリ：（商品名・説明文から判断すること）
+ブランド／商品名：${title || '(不明)'}
+${itemName ? `アイテム名：${itemName}` : 'アイテム名：（商品名から判断）'}
 商品スペック・説明テキスト：${description || '(取得できず)'}
-参考価格：${price || '(不明)'}
+参考価格：${price || '(不明)'}${floorClause(floor)}${toneClause(tone)}${freeformClause(freeform)}${avoidClause(avoidWords)}
 
-# 出力フォーマット・ルール
+# 出力ルール
 
-1. 【一覧ページ用キャッチコピー】（JSONキー: pr）
-- 文字数：20文字〜30文字程度（厳守）
-- ブランド名／商品名の最も特徴的なディテール（素材・柄・フォルム・カラー等）を凝縮した一文。
-- 文字数の括弧書きは付けない。本文のみを出力する。
+① 説明文（である調・約200字）
+- 文体は「である／だ」の断定調で統一（体言止め・名詞句止めも自然に混ぜてよい）。ですます調は使わない。
+- 過度な修飾や詩的表現は避け、事実ベースで簡潔に。
+- 情報の順序：素材・デザイン → ディテール・機能 → 製造背景・ブランド背景。
+- 事実に基づく情報（素材、ディテール、機能、構造、使用シーン、ブランド背景）を明示。
+- モデル名・コレクション名・特有の技術名は「」で囲む（例：「Rond Carré」「Dior Water Lily」）。
+- 推測で断定しない。原文にない情報は書かない。公式説明が取れていない場合は商品名から確実に言える範囲に留める。
+- 入力が英語の場合は原文に忠実に和訳し要点を整える。
+- **文末に「（〇〇文字）」等の付加は不要**。本文のみ出力。
+- トーンは洗練・明快・モード寄りを基本とする。
 
-2. 【詳細ページ用説明文】（JSONキー: desc）
-- 文字数：**200文字程度（目安180〜220字）**。
-- 構成：素材／モデル名 → 主要ディテール（金具・柄・ストラップ等） → 機能・使用シーン → 製造国／ブランド背景、の順で3〜4文に収める。
-- 文末に「（〇〇文字）」と正確な文字数を必ず記載する（本文の文字数のみカウント、括弧書き自体はカウント外）。
-- 誇張せず、246select.com の実掲載文と同じ落ち着いたトーンで書く。
+② PR文（40字以内）
+- 一文で商品の印象・価値を端的に伝える。
+- 語彙は簡潔かつ洗練。
+- 「融合」「構造美」「宿す」「際立つ」「纏う」等の**価値語**を活かす（1つ以上含める）。
+- 次のいずれかを必ず含める：素材の特徴／デザイン性／機能性／ブランドの世界観。
+- 同一ブランド内で語彙・語尾の重複を避ける。
+- 使用例：
+  - 「グラデが際立つ機能派バックパック」
+  - 「クライミング発想が光る、頼れる都市型バッグ」
+  - 「パームと炎が交錯する光沢プリントTシャツ」
+  - 「カーブロゴとモノグラムが際立つベースボールキャップ」
 
 # 出力形式
-以下のJSONで出力する:
-{"pr": "<キャッチコピー本文20〜30字>", "desc": "<説明文180〜220字>（〇〇文字）"}
-
-# 246select.com の実掲載文サンプル（このトーンに揃える）
-- JACQUEMUS クラッチ：「編み込みエフェクトを施したゴートスキン製のテイクアウェイクラッチ「Rond Carré」。ゴールドトーンの持ち手にはスフィア（球体）とキューブ（立方体）のクラスプを配した。マグネット開閉で、内側にカードポケットとコットンライニングを備える。イタリア製。」
-- RIMOWA クロスボディバッグ：「イタリア製のGroove（グルーヴ）- レザー クロスボディバッグ オレンジ スモールは、しなやかで滑らかなカーフレザーを使用。洗練された佇まいで、現代のライフスタイルに寄り添うデザイン。」
-- DIOR トートバッグ：「「Dior Water Lily」モチーフを全面に刺繍した「ディオール ブックトート」スモールサイズ。コレクションショーが披露されたチュイルリー公園へのオマージュとして睡蓮を描き、18世紀ロココ様式に着想を得たDior Médaillonシグネチャーをフロントにあしらった。トップハンドルに加え、調節・取り外し可能なショルダーストラップを備え、ハンドバッグやショルダー、クロスボディとして使える実用的なデザイン。」
+JSONのみで出力する（他のテキスト・コードフェンスは含めない）:
+{"pr": "<40字以内>", "desc": "<約200字・本文のみ>"}`;
+}
 
 # 出力例（200字仕様に拡張したイメージ）
 {"pr": "編み込み風レザーにゴールドの立体クラスプが映えるクラッチ。", "desc": "編み込みエフェクトを施したゴートスキン製のテイクアウェイクラッチ「Rond Carré」。ゴールドトーンの持ち手にはスフィア（球体）とキューブ（立方体）のクラスプを配し、マグネット開閉で広げて中身を取り出せる構造に仕立てた。内側にカードポケットとコットンライニングを備え、ゴールドのロゴと金具が華やかさを添えるイタリア製の一品だ。（171文字）"}`;
 }
 
-function buildPlacePrompt(title, description, category) {
+function buildPlacePrompt({title, description, category, tone, freeform, avoidWords}) {
   const catJa = category === 'hotel' ? 'ホテル' : category === 'cafe' ? 'カフェ' : 'レストラン';
   const focus = category === 'hotel'
     ? '立地・建築や外観 → 客室・パブリックスペース → 料理・体験 → 訪れる価値'
@@ -259,44 +333,37 @@ function buildPlacePrompt(title, description, category) {
       ? '立地・雰囲気 → 内装・空間 → メニュー・過ごし方 → 訪れる価値'
       : '立地・店構え → シェフ／料理ジャンル → 名物メニュー・体験 → 訪れる価値';
   const headingHint = category === 'hotel'
-    ? 'ホテルの個性・立地・世界観を凝縮した一文（例：「アルプスの山懐に抱かれた、静謐なるオーベルジュ」）'
+    ? '例：「アルプスの山懐に抱かれた、静謐なるオーベルジュ」'
     : category === 'cafe'
-      ? 'カフェの個性・立地・雰囲気を凝縮した一文（例：「銀座の裏路地に佇む、大人のための和み珈琲店」）'
-      : 'レストランの個性・料理・世界観を凝縮した一文（例：「京町家で味わう、ミシュラン一つ星の革新的フレンチ」）';
-  return `# 目的
-与えられた「${catJa}情報」をもとに、セレクトショップ「246（246select.com）」の${catJa}紹介ページ用テキストを作成する。
-出力は「見出し」「詳細説明文」「一覧ページ用キャッチコピー」の3種類。
-
-# 役割・トーン＆マナー
-- 上質な旅・生活情報誌の編集者として、事実に基づき洗練された落ち着いたトーンで執筆する。
-- 語尾・文体：「〜だ。」「〜である。」に加え、体言止め・名詞句止め（「〜佇まい。」「〜ロケーション。」）を自然に織り交ぜる。ですます調は使わない。
-- 誇張・主観的絶賛（「唯一無二」「究極」「至高」）や過度な形容詞は避け、具体名・数字・地名等の事実で語る。
-- 推測で断定しない。原文にない情報は書かない。英語原文は忠実に和訳し要点を整える。
+      ? '例：「銀座の裏路地に佇む、大人のための和み珈琲店」'
+      : '例：「京町家で味わう、ミシュラン一つ星の革新的フレンチ」';
+  return `あなたはリステア創業者・高下ひろあき氏のように、感度の高い旅・ライフスタイル情報誌の編集者である。
+以下の${catJa}情報から、掲載用テキストを3種類作成せよ。
 
 # 入力データ
 店名／施設名：${title || '(不明)'}
-公式紹介文：${description || '(取得できず)'}
+公式紹介文：${description || '(取得できず)'}${toneClause(tone)}${freeformClause(freeform)}${avoidClause(avoidWords)}
 
 # 出力ルール
 
-1. 【見出し】（JSONキー: heading）
-- 文字数：**30文字前後（厳守：25〜35字）**
-- ${headingHint}
-- 文字数の括弧書きは付けない。本文のみを出力する。
-- キャッチコピー（pr）とは重複しない別の切り口・語彙で書く。
+① 見出し（heading）— 40字以内
+- ${catJa}の個性・立地・世界観を凝縮した一文（${headingHint}）
+- 説明文の上に置く見出し。一覧用のPR文（pr）とは別の切り口・語彙で書く。
 
-2. 【詳細説明文】（JSONキー: desc）
-- 文字数：**200文字程度（180〜220字）**
-- 構成の順序: ${focus}、を3〜4文で。
-- 文末に「（〇〇文字）」と正確な文字数を必ず記載する。
+② 説明文（desc）— である調・約200字
+- 文体「である／だ」を基本に、体言止め・名詞句止めも自然に混ぜる。ですます調は使わない。
+- 過度な修飾・詩的表現・主観的絶賛（「唯一無二」「至高」等）を避け、事実で語る。
+- 順序：${focus}、を3〜4文で。
+- 推測で断定しない。原文にない情報は書かない。英語原文は忠実に和訳し要点を整える。
+- **文末に「（〇〇文字）」等の付加は不要**。本文のみ。
 
-3. 【一覧ページ用キャッチコピー】（JSONキー: pr）
-- 文字数：20〜30字
-- 施設の魅力を一文で凝縮。見出しとは違う角度で。
+③ PR文（pr）— 一覧用キャッチ・40字以内
+- 一文で施設の魅力を端的に。見出しとは違う切り口で。
+- 語彙は簡潔かつ洗練。同一ブランド内で語彙・語尾の重複を避ける。
 
 # 出力形式
-以下のJSONで出力する:
-{"heading": "<見出し25〜35字>", "pr": "<キャッチ20〜30字>", "desc": "<説明文180〜220字>（〇〇文字）"}`;
+JSONのみで出力する（他のテキスト・コードフェンスは含めない）:
+{"heading": "<40字以内>", "pr": "<40字以内>", "desc": "<約200字・本文のみ>"}`;
 }
 
 function extractFromHtml(html, u) {

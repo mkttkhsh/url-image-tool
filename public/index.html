@@ -69,7 +69,7 @@
 <body>
 <header>
   <h1>URL取得＋正方形化ツール</h1>
-  <div class="sub">商品ページのURLを入れると写真・価格・説明・動画を取得。元画像＋1080×1080の両方を保存できて、である調説明文＋PR文も自動生成します。</div>
+  <div class="sub">商品URLから写真・価格・説明・動画を取得。元画像＋1080正方形を保存、である調説明文＋40字PR（施設は+見出し）を Gemini/Claude で生成。トーン切替＆「もっと〇〇に」再指示、価値語重複回避も。</div>
 </header>
 <div class="wrap">
 
@@ -123,6 +123,20 @@
     <div class="field" id="qWrap">
       <label>JPEG品質 <span id="qVal">95</span></label>
       <div class="range"><input type="range" id="quality" min="60" max="100" value="95"></div>
+    </div>
+    <div class="field">
+      <label>生成AIモデル</label>
+      <select id="genModel">
+        <option value="gemini" selected>Gemini 3.6 flash</option>
+        <option value="claude">Claude 3.5 Sonnet</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>語彙重複回避</label>
+      <div style="display:flex;gap:8px;padding:6px 0;align-items:center">
+        <span style="font-size:12px;color:var(--muted)" id="vocabCount">使用済み: 0語</span>
+        <button class="ghost mini" id="vocabReset" style="padding:4px 9px">リセット</button>
+      </div>
     </div>
   </div>
 
@@ -188,6 +202,21 @@ const $ = s => document.querySelector(s);
 const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#customSize');
 const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
 const outOrig=$('#outOrig'), outSqNative=$('#outSqNative'), outSqSized=$('#outSqSized'), incVideo=$('#incVideo');
+const genModel=$('#genModel');
+
+// ---- セッション内 使用済み価値語トラッキング（E: 語彙重複回避）----
+const VALUE_WORD_POOL = ['融合','構造美','宿す','際立つ','纏う','奏でる','煌めく','静謐','洗練','躍動','格調','光沢','刺繍','構築的','カーブ','グラデーション','クロスボディ','軽量','質感','刻む','投影','昇華','象徴','息づく','包み込む','解き放つ','凝縮','漂う','浸る','紡ぐ','醸す'];
+const sessionUsedWords = new Set();
+function trackUsedWords(text){
+  if(!text) return;
+  for(const w of VALUE_WORD_POOL) if(text.includes(w)) sessionUsedWords.add(w);
+  updateVocabCount();
+}
+function updateVocabCount(){
+  const el=$('#vocabCount'); if(el) el.textContent = `使用済み: ${sessionUsedWords.size}語`;
+}
+$('#vocabReset').onclick = ()=>{ sessionUsedWords.clear(); updateVocabCount(); };
+const TONE_OPTIONS = ['標準','ミニマル寄り','モード寄り','詩的','ストリート','クラシック'];
 const urls=$('#urls'), fetchBtn=$('#fetchBtn'), fetchMsg=$('#fetchMsg'), sourcesEl=$('#sources');
 const selAll=$('#selAll'), selNone=$('#selNone'), srcCount=$('#srcCount'), genAllBtn=$('#genAllBtn');
 const squareBar=$('#squareBar'), squareBtn=$('#squareBtn'), selCount=$('#selCount');
@@ -380,17 +409,24 @@ function renderSources(){
     };
     card.appendChild(origWrap);
 
-    // テキスト生成ツール（カテゴリ切替＋生成ボタン）
+    // テキスト生成ツール（カテゴリ切替＋トーン＋生成ボタン）
     const tools=document.createElement('div'); tools.className='gentools';
     if(!s.category) s.category='product';
-    const catSel=document.createElement('select');
-    catSel.style.cssText='background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px';
+    if(!s.tone) s.tone='標準';
+    const selStyle='background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px';
+    const catSel=document.createElement('select'); catSel.style.cssText=selStyle;
     for(const [k,v] of Object.entries(CAT_LABEL)){
       const o=document.createElement('option'); o.value=k; o.textContent=v; if(k===s.category) o.selected=true; catSel.appendChild(o);
     }
     catSel.onchange=()=>{ s.category=catSel.value; updateGenBtnLabel(); };
-    const catLabel=document.createElement('span'); catLabel.style.cssText='font-size:12px;color:var(--muted)'; catLabel.textContent='カテゴリ:';
-    tools.appendChild(catLabel); tools.appendChild(catSel);
+    tools.appendChild(Object.assign(document.createElement('span'),{textContent:'カテゴリ:',style:'font-size:12px;color:var(--muted)'}));
+    tools.appendChild(catSel);
+    // トーンプリセット
+    const toneSel=document.createElement('select'); toneSel.style.cssText=selStyle;
+    TONE_OPTIONS.forEach(t=>{ const o=document.createElement('option'); o.value=t; o.textContent=t; if(t===s.tone) o.selected=true; toneSel.appendChild(o); });
+    toneSel.onchange=()=>{ s.tone=toneSel.value; };
+    tools.appendChild(Object.assign(document.createElement('span'),{textContent:'トーン:',style:'font-size:12px;color:var(--muted);margin-left:8px'}));
+    tools.appendChild(toneSel);
 
     const genBtn=document.createElement('button'); genBtn.className='mini';
     function updateGenBtnLabel(){
@@ -411,15 +447,15 @@ function renderSources(){
       const hasHead = s.category !== 'product';
       gw.innerHTML=`
         ${hasHead ? `<div class="genfield">
-          <label>見出し（${CAT_LABEL[s.category]||''}・30字前後） <span class="charc" data-for="heading">${hd.length}字</span></label>
+          <label>見出し（${CAT_LABEL[s.category]||''}・40字以内） <span class="charc" data-for="heading" style="color:${hd.length>40?'var(--warn)':'var(--muted)'}">${hd.length}/40字</span></label>
           <textarea class="pr" data-si="${si}" data-k="heading">${esc(hd)}</textarea>
         </div>` : ''}
         <div class="genfield">
-          <label>PR文（一覧用キャッチ） <span class="charc" data-for="pr">${s.gen.pr.length}字</span></label>
+          <label>PR文（一覧用キャッチ・40字以内） <span class="charc" data-for="pr" style="color:${s.gen.pr.length>40?'var(--warn)':'var(--muted)'}">${s.gen.pr.length}/40字</span></label>
           <textarea class="pr" data-si="${si}" data-k="pr">${esc(s.gen.pr)}</textarea>
         </div>
         <div class="genfield">
-          <label>説明文（である調） <span class="charc" data-for="desc">${s.gen.desc.length}字</span></label>
+          <label>説明文（である調・約200字） <span class="charc" data-for="desc">${s.gen.desc.length}字</span></label>
           <textarea class="desc" data-si="${si}" data-k="desc">${esc(s.gen.desc)}</textarea>
         </div>
         <div class="btnrow">
@@ -427,13 +463,36 @@ function renderSources(){
           <button class="ghost mini" data-copy="pr">PR文をコピー</button>
           <button class="ghost mini" data-copy="desc">説明文をコピー</button>
           <button class="ghost mini" data-copy="txt">product.txt形式でコピー</button>
+        </div>
+        <div class="genfield" style="margin-top:10px">
+          <label style="color:var(--muted)">追加指示で再生成 — 例:「もっとモード寄りに」「素材の話を厚めに」「PR文を短く体言止めで」</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" data-freeform="1" style="flex:1;background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px" placeholder="ここに指示を書いて右のボタン" value="${esc(s.freeform||'')}">
+            <button class="ghost mini" data-rerun="1">この指示で再生成</button>
+          </div>
         </div>`;
       gw.querySelectorAll('textarea').forEach(ta=>{
-        ta.oninput=()=>{ s.gen[ta.dataset.k]=ta.value; const c=gw.querySelector(`.charc[data-for="${ta.dataset.k}"]`); if(c) c.textContent=ta.value.length+'字'; };
+        ta.oninput=()=>{
+          s.gen[ta.dataset.k]=ta.value;
+          const c=gw.querySelector(`.charc[data-for="${ta.dataset.k}"]`);
+          if(c){
+            const k=ta.dataset.k;
+            if(k==='pr' || k==='heading'){
+              c.textContent = ta.value.length+'/40字';
+              c.style.color = ta.value.length>40 ? 'var(--warn)' : 'var(--muted)';
+            } else {
+              c.textContent = ta.value.length+'字';
+            }
+          }
+        };
       });
       gw.querySelectorAll('[data-copy]').forEach(btn=>{
         btn.onclick=()=>copyProduct(s, btn.dataset.copy, btn);
       });
+      const ff = gw.querySelector('[data-freeform]');
+      if(ff){ ff.oninput = ()=>{ s.freeform = ff.value; }; }
+      const rerun = gw.querySelector('[data-rerun]');
+      if(rerun){ rerun.onclick = ()=>generateText(si, rerun); }
       card.appendChild(gw);
     }
 
@@ -460,15 +519,27 @@ function renderSources(){
   updateZipBtn();
 }
 
+function generatePayload(s){
+  return {
+    title: s.title, price: s.price, description: s.description,
+    category: s.category||'product',
+    provider: genModel.value,
+    tone: s.tone||'標準',
+    freeform: s.freeform||'',
+    avoidWords: [...sessionUsedWords],
+    floor: s.floor||'', itemName: s.itemName||'',
+  };
+}
 async function generateText(si, btn){
   const s=sources[si];
   const old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
   try{
     const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({title:s.title, price:s.price, description:s.description, category:s.category||'product'})});
+      body:JSON.stringify(generatePayload(s))});
     const d=await r.json();
     if(d.error){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+d.error); return; }
-    s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'' };
+    s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'', provider:d.provider||'' };
+    trackUsedWords(d.pr); trackUsedWords(d.heading);
     renderSources();
   }catch(e){ btn.disabled=false; btn.textContent=old; alert('生成失敗: '+e); }
 }
@@ -480,24 +551,58 @@ async function genAll(){
     genAllBtn.innerHTML=`<span class="spin"></span>生成中… ${++n}/${targets.length}`;
     try{
       const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({title:s.title, price:s.price, description:s.description, category:s.category||'product'})});
-      const d=await r.json(); if(!d.error) s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'' };
+        body:JSON.stringify(generatePayload(s))});
+      const d=await r.json();
+      if(!d.error){
+        s.gen={ desc:d.desc||'', pr:d.pr||'', heading:d.heading||'', provider:d.provider||'' };
+        trackUsedWords(d.pr); trackUsedWords(d.heading);
+      }
     }catch(e){}
   }
   genAllBtn.textContent=old; genAllBtn.disabled=false; renderSources();
 }
 
+// アイテム名 → 英語カテゴリ変換（既存 generate_product_text.py の ITEM_CATEGORY_MAP を移植）
+const ITEM_CATEGORY_MAP = {
+  'バッグ':'Bag','ハンドバッグ':'Handbag','トートバッグ':'Tote Bag','ショルダーバッグ':'Shoulder Bag',
+  'クロスボディバッグ':'Crossbody Bag','クロスボディーバッグ':'Crossbody Bag','クラッチ':'Clutch','ミニクラッチ':'Mini Clutch',
+  'バックパック':'Backpack','リュック':'Backpack','ポーチ':'Pouch','ウォレット':'Wallet','財布':'Wallet',
+  'カードケース':'Card Case','カードホルダー':'Card Holder','キーケース':'Key Case','コインケース':'Coin Case','キーリング':'Key Ring','キーホルダー':'Key Holder',
+  'Tシャツ':'T-Shirt','シャツ':'Shirt','ブラウス':'Blouse','ジャケット':'Jacket','コート':'Coat','ブルゾン':'Blouson',
+  'パーカー':'Hoodie','フーディ':'Hoodie','スウェット':'Sweatshirt','ニット':'Knit','セーター':'Sweater','カーディガン':'Cardigan',
+  'パンツ':'Pants','デニム':'Denim','ジーンズ':'Jeans','ショーツ':'Shorts','ショートパンツ':'Shorts','スカート':'Skirt','ミニスカート':'Mini Skirt',
+  'ワンピース':'Dress','ドレス':'Dress','スニーカー':'Sneakers','シューズ':'Shoes','ブーツ':'Boots','サンダル':'Sandals','ローファー':'Loafers','パンプス':'Pumps','ミュール':'Mules',
+  'サングラス':'Sunglasses','メガネ':'Eyewear','帽子':'Hat','キャップ':'Cap','ハット':'Hat','ビーニー':'Beanie',
+  'スカーフ':'Scarf','マフラー':'Muffler','ストール':'Stole','ベルト':'Belt','ネクタイ':'Tie',
+  'リング':'Ring','ネックレス':'Necklace','ブレスレット':'Bracelet','ピアス':'Earrings','イヤリング':'Earrings','チャーム':'Charm','ウォッチ':'Watch',
+  'キャンドル':'Candle','パルファム':'Parfum','フレグランス':'Fragrance','ソープ':'Soap',
+  'ブック':'Book','マガジン':'Magazine','スピーカー':'Speaker','スケートボードデッキ':'Skateboard Deck','スケートボード':'Skateboard',
+};
+function itemToEn(name){
+  if(!name) return '';
+  for(const [jp, en] of Object.entries(ITEM_CATEGORY_MAP)){ if(name.includes(jp)) return en; }
+  return name;
+}
 function productText(s){
+  // 既存の generate_product_text.py 出力と互換のフォーマット
   const L=[];
   const catLabel = CAT_LABEL[s.category||'product'] || '商品';
-  L.push(`【WordPress投稿タイトル（${catLabel}）】`); L.push(s.title||''); L.push('');
-  if(s.price){ L.push('【価格】'); L.push(s.price); L.push(''); }
-  if(s.gen){
-    if(s.gen.heading){ L.push(`【見出し（${catLabel}・30字前後）】`); L.push(s.gen.heading); L.push(''); }
-    L.push('【PR文（一覧用キャッチ）】'); L.push(s.gen.pr||''); L.push('');
-    L.push(`【${catLabel}説明（である調）】`); L.push(s.gen.desc||''); L.push(''); }
-  if(s.description){ L.push('【公式説明（原文）】'); L.push(s.description); L.push(''); }
-  L.push('【ショッピングURL】'); L.push(s.pageUrl||'');
+  const brand = (s.brand||'').toUpperCase() || (s.title||'').split(/[\s　\/]/)[0]?.toUpperCase() || '';
+  const itemJa = s.itemName || '';
+  const wpTitle = itemJa ? `${brand}　${itemJa}` : (s.title||'');
+  const enLabel = itemJa ? `${brand} / ${itemToEn(itemJa)}` : '';
+  L.push('【WordPress投稿タイトル】'); L.push(wpTitle); L.push('');
+  L.push('【ショッピングURL】'); L.push(s.pageUrl||''); L.push('');
+  if(s.floor){ L.push('【掲載フロア】'); L.push(s.floor); L.push(''); }
+  if(enLabel){ L.push('【一覧用テキスト（英語部分）】'); L.push(enLabel); L.push(''); }
+  if(s.gen && s.gen.heading){ L.push('【見出し（40字以内）】'); L.push(s.gen.heading); L.push(''); }
+  L.push('【一覧用テキスト（日本語PR文：40字以内）】');
+  L.push((s.gen && s.gen.pr) || '※ 要作成'); L.push('');
+  L.push('【商品説明（である調／約200字）】');
+  L.push((s.gen && s.gen.desc) || '※ 要作成'); L.push('');
+  if(s.description){ L.push('【商品説明（公式原文）】'); L.push(s.description); L.push(''); }
+  if(s.gen && s.gen.provider){ L.push(`【生成モデル】`); L.push(s.gen.provider); L.push(''); }
+  L.push('---'); L.push(`元URL: ${s.pageUrl||''}`);
   return L.join('\n');
 }
 async function copyProduct(s, kind, btn){
