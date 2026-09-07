@@ -4,7 +4,74 @@
 //   GET /api/img?src=<画像URL>           → 画像バイトをCORS付きで代理配信（Canvas汚染回避）
 //   それ以外 → public/ の静的アセット（UI）
 
-const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Safari/537.36';
+
+// リアルなブラウザヘッダ（多くの高級ブランドサイトは既定UAで403返す）
+function browserHeaders(extra){
+  const h = {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control': 'no-cache',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    // 一部サイトの consent-gate 回避のヒント（Cookie ヘッダで simulate）
+    'Cookie': 'geo=jp; locale=ja; country=JP; cookie_consent=1; OptanonAlertBoxClosed=1',
+  };
+  return Object.assign(h, extra || {});
+}
+
+// top20+ ドメイン別のヒント：ロケールリライト・Shopify判定・カスタム抽出
+// key: hostname (www. なし)
+const BRAND_HINTS = {
+  'jacquemus.com': { platform:'shopify' },
+  'loewe.com':     { platform:'sfcc',    locale:'/ja-jp/' },
+  'celine.com':    { platform:'sfcc',    locale:'/jp-ja/' },
+  'dior.com':      { platform:'demandware', locale:'/ja_jp/' },
+  'fendi.com':     { platform:'sfcc',    locale:'/ja-jp/' },
+  'balenciaga.com':{ platform:'sfcc',    locale:'/ja-jp/' },
+  'givenchy.com':  { platform:'sfcc',    locale:'/ja-jp/' },
+  'bottegaveneta.com':{ platform:'sfcc', locale:'/ja-jp/' },
+  'alexandermcqueen.com':{ platform:'sfcc', locale:'/ja-jp/' },
+  'ysl.com':       { platform:'sfcc',    locale:'/jp-ja/' },
+  'palmangels.com':{ platform:'sfcc',    locale:'/jp-jp/' },
+  'off---white.com':{ platform:'farfetch', locale:'/jp/' },
+  'kenzo.com':     { platform:'sfcc',    locale:'/jp-ja/' },
+  'jp.burberry.com':{ platform:'sfcc' },
+  'gucci.com':     { platform:'demandware', locale:'/ja/' },
+  'undercoverism.com':{ platform:'shopify' },
+  'ourlegacy.com': { platform:'shopify' },
+  'rickowens.eu':  { platform:'shopify' },
+  'courreges.com': { platform:'shopify' },
+  'sportyandrich.com':{ platform:'shopify' },
+  'kith.com':      { platform:'shopify' },
+  'auralee.jp':    { platform:'shopify' },
+  'diptyqueparis.com':{ platform:'sfcc' },
+  'moncler.com':   { platform:'sfcc',    locale:'/ja-jp/' },
+  'soph.net':      { platform:'shopify' },
+  'enfantsrichesdeprimes.com':{ platform:'shopify' },
+  'neighborhood.jp':{ platform:'shopify' },
+  'heliotemil.com':{ platform:'shopify' },
+  'sacai.jp':      { platform:'shopify' },
+};
+function brandHint(u){
+  const h = u.host.replace(/^www\./,'');
+  return BRAND_HINTS[h] || null;
+}
+
+// HTMLが JS描画のみで空か判定（画像抽出も価格もJSON-LDも取れない典型）
+function isLikelyEmptySpa(html){
+  if(!html) return false;
+  if(html.length < 15000) return true; // 極端に短いランディング
+  // <img> が3個未満かつ og:image も無い
+  const imgCount = (html.match(/<img\b/gi) || []).length;
+  const hasOg = /property=["']og:image/i.test(html);
+  return imgCount < 3 && !hasOg;
+}
 
 export default {
   async fetch(request, env) {
@@ -36,38 +103,41 @@ async function handleScrape(url) {
   if (!target) return json({ error: 'url パラメータが必要です' }, 400);
   let u;
   try { u = new URL(target); } catch (e) { return json({ error: 'URLが不正です' }, 400); }
+  const hint = brandHint(u);
 
-  let title = '', images = [], videos = [], source = '', price = '', description = '', currency = '';
+  let title = '', images = [], videos = [], source = '', price = '', description = '', currency = '', warn = '';
   try {
-    // 1) Shopify: /products/<handle> → <handle>.json（画像）＋<handle>.js（動画含むmedia）
-    const m = u.pathname.match(/\/products\/([^/?#]+)/);
-    if (m) {
-      const jsonUrl = `${u.origin}/products/${m[1]}.json`;
-      const r = await fetch(jsonUrl, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+    // 1) Shopify 経路：/products/<handle>.json / .js（ヒントで shopify 指定のブランドも）
+    let mProd = u.pathname.match(/\/products\/([^/?#]+)/);
+    const isShopifyLike = mProd || (hint && hint.platform === 'shopify');
+    if (mProd) {
+      const jsonUrl = `${u.origin}/products/${mProd[1]}.json`;
+      const r = await fetch(jsonUrl, { headers: browserHeaders({ 'Accept': 'application/json' }) });
       if (r.ok && (r.headers.get('content-type') || '').includes('json')) {
-        const d = await r.json();
-        if (d && d.product) {
-          title = d.product.title || '';
-          images = (d.product.images || []).map(i => i.src).filter(Boolean);
-          const v = (d.product.variants || [])[0] || {};
-          price = v.price != null ? String(v.price) : '';
-          description = stripHtml(d.product.body_html || '');
-          source = 'shopify';
-          try {
-            const mr = await fetch(`${u.origin}/meta.json`, { headers: { 'User-Agent': UA } });
-            if (mr.ok) { const md = await mr.json(); currency = md.currency || ''; }
-          } catch (e) { /* ignore */ }
-        }
+        try {
+          const d = await r.json();
+          if (d && d.product) {
+            title = d.product.title || '';
+            images = (d.product.images || []).map(i => i.src).filter(Boolean);
+            const v = (d.product.variants || [])[0] || {};
+            price = v.price != null ? String(v.price) : '';
+            description = stripHtml(d.product.body_html || '');
+            source = 'shopify';
+            try {
+              const mr = await fetch(`${u.origin}/meta.json`, { headers: browserHeaders() });
+              if (mr.ok) { const md = await mr.json(); currency = md.currency || ''; }
+            } catch (e) { /* ignore */ }
+          }
+        } catch (e) { /* not JSON as expected */ }
       }
-      // .js エンドポイントで media（動画含む）を追加取得
+      // .js エンドポイントで media（動画）を追加取得
       try {
-        const jsUrl = `${u.origin}/products/${m[1]}.js`;
-        const rr = await fetch(jsUrl, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+        const jsUrl = `${u.origin}/products/${mProd[1]}.js`;
+        const rr = await fetch(jsUrl, { headers: browserHeaders({ 'Accept': 'application/json' }) });
         if (rr.ok) {
           const dd = await rr.json();
           for (const md of (dd.media || [])) {
             if (md.media_type === 'video' && Array.isArray(md.sources)) {
-              // 最大サイズ/最高品質のmp4を選ぶ（無ければ先頭）
               const mp4s = md.sources.filter(s => (s.mime_type || '').includes('mp4') || /\.mp4/i.test(s.url || ''));
               const pick = mp4s.sort((a, b) => (b.width || 0) - (a.width || 0))[0] || md.sources[0];
               if (pick && pick.url) videos.push(pick.url);
@@ -76,10 +146,15 @@ async function handleScrape(url) {
         }
       } catch (e) { /* ignore */ }
     }
-    // 2) フォールバック: HTMLから og:image / JSON-LD / <img> ＋ 価格・通貨・説明・動画を抽出
+
+    // 2) HTMLフェッチ（フォールバック＋主要な price/desc 補完）
     if (images.length === 0 || videos.length === 0 || !price || !description || !currency) {
-      const r = await fetch(target, { headers: { 'User-Agent': UA } });
+      const r = await fetch(target, { headers: browserHeaders(), redirect: 'follow' });
       const html = await r.text();
+      // JS描画のみで空っぽっぽい場合は警告
+      if (isLikelyEmptySpa(html) && images.length === 0) {
+        warn = 'このサイトは動的描画（JavaScript）中心の可能性が高く、Workerからは十分に取得できませんでした。ローカルの246-listingスキル（Playwright）での処理を推奨します。';
+      }
       if (!title) {
         const t = html.match(/<title[^>]*>([^<]*)<\/title>/i);
         if (t) title = decodeHtml(t[1].trim());
@@ -98,7 +173,10 @@ async function handleScrape(url) {
   images = dedup(images.map(s => absolutize(s, u)).filter(Boolean));
   videos = dedup(videos.map(s => absolutize(s, u)).filter(Boolean));
   const { priceJpy, priceText } = await toPriceText(price, currency);
-  return json({ title, price, currency, priceJpy, priceText, description, images, videos, count: images.length, videoCount: videos.length, source });
+  const result = { title, price, currency, priceJpy, priceText, description, images, videos, count: images.length, videoCount: videos.length, source };
+  if (warn) result.warn = warn;
+  if (hint) result.platform = hint.platform;
+  return json(result);
 }
 
 // 価格を日本円換算した表示文字列を作る
@@ -434,8 +512,17 @@ async function handleImg(url) {
   const src = url.searchParams.get('src');
   if (!src) return new Response('src required', { status: 400 });
   let r;
-  try { r = await fetch(src, { headers: { 'User-Agent': UA } }); }
-  catch (e) { return new Response('fetch failed', { status: 502 }); }
+  try {
+    // Referer を画像元サイトに設定（ホットリンク保護回避）
+    let referer = '';
+    try { const u = new URL(src); referer = u.origin + '/'; } catch(e){}
+    r = await fetch(src, {
+      headers: browserHeaders({
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        ...(referer ? { 'Referer': referer } : {}),
+      }),
+    });
+  } catch (e) { return new Response('fetch failed', { status: 502 }); }
   const h = new Headers();
   h.set('content-type', r.headers.get('content-type') || 'application/octet-stream');
   h.set('Access-Control-Allow-Origin', '*');

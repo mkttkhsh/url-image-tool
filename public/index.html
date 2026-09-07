@@ -140,8 +140,13 @@
     </div>
   </div>
 
-  <h2>1. 商品ページのURL（複数OK・1行に1つ）</h2>
+  <h2>1. 商品ページのURL（複数OK・1行に1つ／スプレッドシートからTSV貼付も可）</h2>
   <div class="urlbox">
+    <div class="bar" style="margin-bottom:8px">
+      <label style="font-size:13px;color:var(--fg)"><input type="radio" name="inputMode" value="url" checked> URL入力</label>
+      <label style="font-size:13px;color:var(--fg)"><input type="radio" name="inputMode" value="tsv"> TSV貼付（掲載フロア／ブランド／アイテム／URL）</label>
+      <span class="count" id="tsvParseCount"></span>
+    </div>
     <textarea id="urls" placeholder="https://d1milano.com/products/aape-grey-camo-nylon&#10;https://d1milano.com/products/aape-red-camo-canva"></textarea>
     <div class="bar">
       <button id="fetchBtn">写真・情報を取得</button>
@@ -246,6 +251,76 @@ function collectUrls(){
   return urls.value.split(/\s+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
 }
 
+// ---- TSV貼付モード（スプレッドシートから直接） ----
+const FLOOR_PATTERN = /(2F|3F|4F|5F|B[12])[\s ]*(LUXURY|HIGH\s*FASHION|CONTEMPORARY|STREET|INTERIOR|DIGITAL|BEAUTY|BATH|KIDS|TRAVEL)/i;
+function currentInputMode(){
+  const el = document.querySelector('input[name="inputMode"]:checked');
+  return el? el.value : 'url';
+}
+function parseTsvRow(rawLine){
+  const cells = rawLine.split('\t').map(c=>c.trim());
+  // URL: 最初の http* セル
+  let url = '';
+  for(const c of cells){ if(/^https?:\/\//i.test(c)){ url = c; break; } }
+  // 掲載フロア
+  const iFloor = cells.findIndex(c => FLOOR_PATTERN.test(c));
+  let floor = '', brand = '', item = '';
+  if(iFloor >= 0){
+    floor = cells[iFloor];
+    brand = (cells[iFloor+1] || '').trim();
+    item  = (cells[iFloor+2] || '').trim();
+  } else {
+    // フォールバック: ブランドは大文字が多いセル、アイテムはカタカナ含むセル
+    for(const c of cells){
+      if(!brand && /^[A-Z0-9\s&\-\.]{2,}$/.test(c) && !/^https?:/i.test(c)) brand = c;
+      else if(!item && /[゠-ヿ]/.test(c)) item = c;
+    }
+  }
+  return { url, floor, brand, item };
+}
+function parseTsvInput(text){
+  const lines = text.split(/\r?\n/).map(l => l.trimEnd()).filter(l => l.trim());
+  const rows = [];
+  for(const line of lines){
+    if(!line.includes('\t')) continue;
+    // ヘッダ行スキップ
+    if(/掲載フロア|ブランド名|アイテム名/.test(line) && !/^https?:/i.test(line)) continue;
+    const p = parseTsvRow(line);
+    if(p.url) rows.push(p);
+  }
+  return rows;
+}
+function updateTsvCounter(){
+  const el = $('#tsvParseCount');
+  if(!el) return;
+  if(currentInputMode() !== 'tsv'){ el.textContent=''; return; }
+  const rows = parseTsvInput(urls.value);
+  el.textContent = rows.length ? `${rows.length}件` : '';
+}
+// フロア＋アイテム名から施設カテゴリを推定
+function categoryFromRow(floor, itemName, pageUrl){
+  if(/TRAVEL/i.test(floor||'')){
+    const t = (itemName||'') + ' ' + (pageUrl||'');
+    if(/ホテル|オーベルジュ|旅館|リゾート|hotel|ryokan|resort|inn/i.test(t)) return 'hotel';
+    if(/カフェ|コーヒー|喫茶|cafe|coffee|kissa/i.test(t)) return 'cafe';
+    if(/レストラン|ダイニング|バー|restaurant|dining|bistro|izakaya|bar/i.test(t)) return 'restaurant';
+    return 'restaurant';
+  }
+  return detectCategory(pageUrl);
+}
+// 入力モード切替
+document.querySelectorAll('input[name="inputMode"]').forEach(r=>{
+  r.onchange = ()=>{
+    if(currentInputMode()==='tsv'){
+      urls.placeholder = '掲載フロア\tブランド名\tアイテム名\t...(タブ区切り)...\tURL\n2F LUXURY&HIGHFASHION\tDIOR\tトートバッグ\t\t\t\t\t\t\t\thttps://www.dior.com/...\n2F LUXURY&HIGHFASHION\tLOEWE\tスニーカー\t\t\t\t\t\t\t\thttps://www.loewe.com/...\n\n※ スプレッドシートで担当分の行を選択してコピー→ここに貼付';
+    } else {
+      urls.placeholder = 'https://d1milano.com/products/aape-grey-camo-nylon\nhttps://d1milano.com/products/aape-red-camo-canva';
+    }
+    updateTsvCounter();
+  };
+});
+urls.addEventListener('input', updateTsvCounter);
+
 // ---- 対応ブランド自動集計（localStorage 永続化）----
 const STATS_KEY='246_brand_stats_v1';
 function loadStats(){ try{ return JSON.parse(localStorage.getItem(STATS_KEY)||'{}'); }catch(e){ return {}; } }
@@ -341,27 +416,36 @@ function openAllUrls(list){
   return opened;
 }
 async function doFetch(){
-  const list = collectUrls();
-  if(!list.length){ fetchMsg.className='msg err'; fetchMsg.textContent='URLを入力してください'; return; }
-  // ポップアップブロッカー回避：ユーザークリックイベントの同期処理の中で window.open する必要があるため
-  // 取得の非同期処理を始める前にここで開く
-  if($('#autoOpen').checked) openAllUrls(list);
+  // 入力を解析：URL入力 or TSV貼付
+  let items = [];
+  if(currentInputMode()==='tsv'){
+    items = parseTsvInput(urls.value).map(r => ({ pageUrl:r.url, floor:r.floor, brand:r.brand, itemName:r.item }));
+  } else {
+    items = collectUrls().map(u => ({ pageUrl:u, floor:'', brand:'', itemName:'' }));
+  }
+  if(!items.length){ fetchMsg.className='msg err'; fetchMsg.textContent = currentInputMode()==='tsv' ? 'TSVからURLを含む行が見つかりませんでした' : 'URLを入力してください'; return; }
+  // ポップアップブロッカー回避：同期でwindow.openを呼ぶ
+  if($('#autoOpen').checked) openAllUrls(items.map(it=>it.pageUrl));
   fetchBtn.disabled=true; fetchMsg.className='msg'; fetchMsg.innerHTML='<span class="spin"></span>取得中…';
   sources=[];
   let ok=0, ng=0;
-  for(const pageUrl of list){
+  for(const it of items){
+    const pageUrl = it.pageUrl;
     try{
       const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
       const d = await r.json();
       recordScrape(pageUrl, d, !!d.error);
       const vids=(d.videos||[]).map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true }));
-      const cat = detectCategory(pageUrl);
-      if(d.error || !d.images || !d.images.length){ ng++; sources.push({pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, gen:null, category:cat, error:d.error||'画像が見つかりませんでした'}); continue; }
+      const cat = categoryFromRow(it.floor, it.itemName, pageUrl);
+      const common = { pageUrl, floor:it.floor, brand:it.brand, itemName:it.itemName, category:cat, gen:null };
+      // TSVでブランド/アイテムがあれば、タイトル未取得時のフォールバックにも使う
+      const fallbackTitle = it.brand && it.itemName ? `${it.brand}　${it.itemName}` : (it.brand || pageUrl);
+      if(d.error || !d.images || !d.images.length){ ng++; sources.push({ ...common, title:d.title||fallbackTitle, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, error:d.error||d.warn||'画像が見つかりませんでした' }); continue; }
       ok++;
-      sources.push({ pageUrl, title:d.title||pageUrl, price:d.priceText||d.price||'', description:d.description||'', gen:null, category:cat,
+      sources.push({ ...common, title:d.title||fallbackTitle, price:d.priceText||d.price||'', description:d.description||'', warn:d.warn||'',
         images:d.images.map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true })),
         videos:vids });
-    }catch(e){ ng++; recordScrape(pageUrl, null, true); sources.push({pageUrl, title:pageUrl, images:[], error:String(e)}); }
+    }catch(e){ ng++; recordScrape(pageUrl, null, true); sources.push({pageUrl, floor:it.floor, brand:it.brand, itemName:it.itemName, title:pageUrl, images:[], error:String(e)}); }
   }
   renderStats();
   fetchBtn.disabled=false;
@@ -387,9 +471,12 @@ function renderSources(){
     const head=document.createElement('div'); head.className='prodhead';
     head.innerHTML = `<span class="pt">${esc(s.title)}</span>`
       + (s.price? `<span class="pp">${esc(s.price)}</span>`:'')
+      + (s.floor ? `<span class="pp" style="color:var(--muted);font-size:12px">📍 ${esc(s.floor)}</span>` : '')
+      + (s.itemName ? `<span class="pp" style="color:var(--muted);font-size:12px">🏷 ${esc(s.itemName)}</span>` : '')
       + ((s.videos&&s.videos.length)? `<span class="pp" style="color:var(--accent)">▶ 動画 ${s.videos.length}本</span>`:'')
       + (s.pageUrl? `<a href="${esc(s.pageUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">ページを開く ↗</a>`:'')
-      + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'');
+      + (s.error? `<span class="warn">⚠ ${esc(s.error)}</span>`:'')
+      + (s.warn? `<span class="warn" style="font-size:12px">ℹ ${esc(s.warn)}</span>`:'');
     card.appendChild(head);
 
     // 公式説明（原文）— 常に編集可能。取れなかった場合は貼り付けを促すプレースホルダ
