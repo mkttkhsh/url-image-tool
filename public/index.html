@@ -120,6 +120,10 @@
       <label>動画</label>
       <select id="incVideo"><option value="on" selected>ある場合ダウンロード</option><option value="off">スキップ</option></select>
     </div>
+    <div class="field">
+      <label>画像フィルタ</label>
+      <select id="imgFilter"><option value="auto" selected>主要画像のみ（既定・最大20枚）</option><option value="off">全画像を表示</option></select>
+    </div>
     <div class="field" id="qWrap">
       <label>JPEG品質 <span id="qVal">95</span></label>
       <div class="range"><input type="range" id="quality" min="60" max="100" value="95"></div>
@@ -208,6 +212,7 @@ const sizeMode=$('#sizeMode'), customWrap=$('#customWrap'), customSize=$('#custo
 const bgMode=$('#bgMode'), fmt=$('#fmt'), quality=$('#quality'), qVal=$('#qVal'), qWrap=$('#qWrap'), nameMode=$('#nameMode'), urlNum=$('#urlNum');
 const outOrig=$('#outOrig'), outSqNative=$('#outSqNative'), outSqSized=$('#outSqSized'), incVideo=$('#incVideo');
 const genModel=$('#genModel');
+const imgFilter=$('#imgFilter');
 
 // ---- セッション内 使用済み価値語トラッキング（E: 語彙重複回避）----
 const VALUE_WORD_POOL = ['融合','構造美','宿す','際立つ','纏う','奏でる','煌めく','静謐','洗練','躍動','格調','光沢','刺繍','構築的','カーブ','グラデーション','クロスボディ','軽量','質感','刻む','投影','昇華','象徴','息づく','包み込む','解き放つ','凝縮','漂う','浸る','紡ぐ','醸す'];
@@ -432,12 +437,14 @@ async function doFetch(){
   for(const it of items){
     const pageUrl = it.pageUrl;
     try{
-      const r = await fetch('/api/scrape?url='+encodeURIComponent(pageUrl));
+      const scrapeUrl = '/api/scrape?url='+encodeURIComponent(pageUrl)+'&filter='+encodeURIComponent(imgFilter.value||'auto')+'&maxImages=20';
+      const r = await fetch(scrapeUrl);
       const d = await r.json();
       recordScrape(pageUrl, d, !!d.error);
       const vids=(d.videos||[]).map(src=>({ url:'/api/img?src='+encodeURIComponent(src), remoteSrc:src, sel:true }));
       const cat = categoryFromRow(it.floor, it.itemName, pageUrl);
-      const common = { pageUrl, floor:it.floor, brand:it.brand, itemName:it.itemName, category:cat, gen:null };
+      const common = { pageUrl, floor:it.floor, brand:it.brand, itemName:it.itemName, category:cat, gen:null,
+        rawImageCount: d.rawImageCount||0, filterStats: d.filterStats||null, productId: d.productId||'' };
       // TSVでブランド/アイテムがあれば、タイトル未取得時のフォールバックにも使う
       const fallbackTitle = it.brand && it.itemName ? `${it.brand}　${it.itemName}` : (it.brand || pageUrl);
       if(d.error || !d.images || !d.images.length){ ng++; sources.push({ ...common, title:d.title||fallbackTitle, price:d.priceText||d.price||'', description:d.description||'', images:[], videos:vids, error:d.error||d.warn||'画像が見つかりませんでした' }); continue; }
@@ -585,7 +592,13 @@ function renderSources(){
 
     // 画像グリッド（取得画像＋手動アップロード）
     const ih=document.createElement('div'); ih.className='imgs-h';
-    ih.innerHTML = `<span>画像 ${s.images.length}枚${s.images.length?'（クリックで選択切替）':'（取得できていません）'}</span>`;
+    let filterInfo = '';
+    if(s.rawImageCount && s.rawImageCount > s.images.length){
+      const st = s.filterStats;
+      const detail = st ? `装飾${st.decor||0} / 小${st.tiny||0} / 重複${st.dedup||0}` : '';
+      filterInfo = `<span style="color:var(--muted);font-size:11px;margin-left:8px">（元${s.rawImageCount}枚→${s.images.length}枚に絞り込み${detail?' ・ '+detail:''}${s.productId?' ・ ID:'+esc(s.productId):''}）</span>`;
+    }
+    ih.innerHTML = `<span>画像 ${s.images.length}枚${s.images.length?'（クリックで選択切替）':'（取得できていません）'}${filterInfo}</span>`;
     const addBtn=document.createElement('button'); addBtn.className='ghost mini'; addBtn.style.marginLeft='10px';
     addBtn.textContent='＋画像をアップロード'; addBtn.onclick=()=>addManualImages(si);
     ih.appendChild(addBtn);

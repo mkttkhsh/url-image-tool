@@ -73,6 +73,83 @@ function isLikelyEmptySpa(html){
   return imgCount < 3 && !hasOg;
 }
 
+// ========== 画像フィルタ（主要商品画像だけを残す） ==========
+// URLから商品ID/SKUらしき文字列を抽出（例: MB220606, LW10XX 等の [A-Z0-9]{4,}）
+function extractProductId(pathname){
+  const seg = decodeURIComponent(pathname).split('/').filter(Boolean).pop() || '';
+  const noExt = seg.replace(/\.(html?|aspx?|php|jsp)$/i,'');
+  // 最後に現れる [A-Z0-9]{5,} や 6+桁の数字を優先
+  const ids = noExt.match(/[A-Z][A-Z0-9]{4,}|\d{6,}/g);
+  return ids && ids.length ? ids[ids.length-1] : '';
+}
+// 装飾（ナビ・バナー・ロゴ・キャンペーン画像）を示すパス／ファイル名パターン
+const DECOR_PATH = /(sharedlibrary|library-sites|library_sites|\/menu\/|\/menu_|\/nav\/|\/navi[\-_\/]|\/navigation\/|\/campaign\/|\/banner|\/hero[\-_\/]|\/promo\/|\/social\/|\/pattern[\-_]|\/background|\/tracking|\/pixel|\/sprite)/i;
+const DECOR_FILE = /(^|[\-_\/\.])(logo|favicon|sprite|placeholder|blank|tracking|pixel|social|banner|hero|thumb(?!nail_product)|icon)([\-_\.]|$)/i;
+// URLからサイズヒントを抽出（既知パラメータ・ファイル名パターン・パスセグメント）
+function urlSizeHint(url){
+  let m = url.match(/[?&](?:sw|sh|width|w|h|size|maxwidth|maxheight)=(\d{3,5})/i);
+  if(m) return parseInt(m[1]);
+  m = url.match(/[?&]\$([a-z0-9_]+)\$?/i); // SFCC preset (sizeless)
+  // ファイル名末尾: _800x800 / -800x800 / _800x
+  m = url.match(/[_-](\d{3,5})(?:x(\d{3,5}))?\.[a-z0-9]+(?:$|\?)/i);
+  if(m) return Math.max(parseInt(m[1]), parseInt(m[2]||0));
+  // パス: /2048/ or /1000x1000/
+  m = url.match(/\/(\d{3,5})(?:x\d{3,5})?\/(?=[^\/]+\.[a-z0-9]+(?:$|\?))/i);
+  if(m) return parseInt(m[1]);
+  return null;
+}
+// 同一画像の重複排除用キー（サイズ・品質パラメータ・サイズ接尾辞を除去）
+function baseImageKey(url){
+  try{
+    const u = new URL(url);
+    ['sw','sh','width','w','h','q','quality','format','sfrm','$','maxwidth','maxheight','v','ts','_'].forEach(k=>u.searchParams.delete(k));
+    const p = u.pathname.replace(/[_-]\d{2,5}(?:x\d{2,5})?(\.[a-z0-9]+)$/i,'$1');
+    const q = [...u.searchParams].map(([k,v])=>`${k}=${v}`).sort().join('&');
+    return u.origin + p + (q?'?'+q:'');
+  }catch(e){ return url; }
+}
+function filterImages(rawImages, pageUrl, maxImages){
+  const stats = { total: rawImages.length, decor:0, tiny:0, dedup:0, kept:0 };
+  if(!rawImages.length) return { kept:[], stats };
+  const productId = extractProductId(new URL(pageUrl).pathname);
+  // Step1: 装飾/極小をフィルタ、スコアリング
+  const scored = [];
+  for(const url of rawImages){
+    if(DECOR_PATH.test(url) || DECOR_FILE.test(url.split('/').pop()||'')){ stats.decor++; continue; }
+    const size = urlSizeHint(url);
+    if(size!=null && size<400){ stats.tiny++; continue; }
+    let score = 0;
+    if(productId && url.toUpperCase().includes(productId.toUpperCase())) score += 100;
+    if(/\/all-images\//i.test(url)) score += 40;
+    if(/\/(products?|pdp|dam)\//i.test(url)) score += 30;
+    if(/\/product-images\//i.test(url)) score += 30;
+    if(size!=null) score += Math.min(20, Math.floor(size/100));
+    scored.push({ url, score, size: size||0, order: scored.length });
+  }
+  // Step2: 重複排除（同じ画像の別サイズは高スコア/大サイズを残す）
+  const byBase = new Map();
+  for(const it of scored){
+    const k = baseImageKey(it.url);
+    const prev = byBase.get(k);
+    if(!prev){ byBase.set(k, it); continue; }
+    if(it.score>prev.score || (it.score===prev.score && it.size>prev.size)){
+      byBase.set(k, it); stats.dedup++;
+    } else { stats.dedup++; }
+  }
+  let unique = [...byBase.values()];
+  // Step3: 商品IDマッチが見つかったら、その画像だけに絞る（強シグナル）
+  if(productId){
+    const withId = unique.filter(i => i.url.toUpperCase().includes(productId.toUpperCase()));
+    if(withId.length >= 1) unique = withId;
+  }
+  // Step4: スコア降順→出現順で並べ、上限で切る
+  unique.sort((a,b) => (b.score-a.score) || (a.order-b.order));
+  const cap = Math.max(1, Math.min(50, maxImages || 20));
+  const kept = unique.slice(0, cap).map(i => i.url);
+  stats.kept = kept.length;
+  return { kept, stats, productId };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -104,6 +181,8 @@ async function handleScrape(url) {
   let u;
   try { u = new URL(target); } catch (e) { return json({ error: 'URLが不正です' }, 400); }
   const hint = brandHint(u);
+  const maxImages = parseInt(url.searchParams.get('maxImages') || '20') || 20;
+  const filterMode = url.searchParams.get('filter') || 'auto'; // auto | off
 
   let title = '', images = [], videos = [], source = '', price = '', description = '', currency = '', warn = '';
   try {
@@ -172,8 +251,18 @@ async function handleScrape(url) {
 
   images = dedup(images.map(s => absolutize(s, u)).filter(Boolean));
   videos = dedup(videos.map(s => absolutize(s, u)).filter(Boolean));
+  // フィルタ適用（filter=off で無効化可能）
+  const imagesRaw = images;
+  let filterStats = null, productId = '';
+  if (filterMode !== 'off' && images.length > 1) {
+    const filtered = filterImages(images, target, maxImages);
+    images = filtered.kept;
+    filterStats = filtered.stats;
+    productId = filtered.productId || '';
+  }
   const { priceJpy, priceText } = await toPriceText(price, currency);
   const result = { title, price, currency, priceJpy, priceText, description, images, videos, count: images.length, videoCount: videos.length, source };
+  if (imagesRaw.length !== images.length) { result.rawImageCount = imagesRaw.length; result.filterStats = filterStats; result.productId = productId; }
   if (warn) result.warn = warn;
   if (hint) result.platform = hint.platform;
   return json(result);
