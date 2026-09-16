@@ -98,12 +98,20 @@ function urlSizeHint(url){
   if(m) return parseInt(m[1]);
   return null;
 }
-// 同一画像の重複排除用キー（サイズ・品質パラメータ・サイズ接尾辞を除去）
+// 同一画像の重複排除用キー（サイズ・品質パラメータ・サイズ接尾辞・CDNプレフィクスを除去）
 function baseImageKey(url){
   try{
-    const u = new URL(url);
+    // HTMLエンティティのデコード（&amp; 等）
+    const cleaned = url.replace(/&amp;/g,'&').replace(/&#0?38;/g,'&');
+    const u = new URL(cleaned);
     ['sw','sh','width','w','h','q','quality','format','sfrm','$','maxwidth','maxheight','v','ts','_'].forEach(k=>u.searchParams.delete(k));
-    const p = u.pathname.replace(/[_-]\d{2,5}(?:x\d{2,5})?(\.[a-z0-9]+)$/i,'$1');
+    let p = u.pathname
+      // SFCC/Demandware: /dw/image/v2/<REALM>/on/demandware.static/ → /on/demandware.static/
+      .replace(/^\/dw\/image\/v\d+\/[^\/]+\/on\/demandware\.static\//i, '/on/demandware.static/')
+      // Shopify CDN: /cdn/shop/files/... の前のバージョンID
+      .replace(/(\/cdn\/shop\/[^?]+)\?/, '$1')
+      // ファイル末尾の _WxH や -WxH サイズ接尾辞
+      .replace(/[_-]\d{2,5}(?:x\d{2,5})?(\.[a-z0-9]+)$/i,'$1');
     const q = [...u.searchParams].map(([k,v])=>`${k}=${v}`).sort().join('&');
     return u.origin + p + (q?'?'+q:'');
   }catch(e){ return url; }
@@ -252,9 +260,11 @@ async function handleScrape(url) {
   images = dedup(images.map(s => absolutize(s, u)).filter(Boolean));
   videos = dedup(videos.map(s => absolutize(s, u)).filter(Boolean));
   // フィルタ適用（filter=off で無効化可能）
+  // 画像＋動画の合計が10以下なら小規模ページとみなし、フィルタしないで全て残す
   const imagesRaw = images;
+  const totalMedia = images.length + videos.length;
   let filterStats = null, productId = '';
-  if (filterMode !== 'off' && images.length > 1) {
+  if (filterMode !== 'off' && totalMedia > 10) {
     const filtered = filterImages(images, target, maxImages);
     images = filtered.kept;
     filterStats = filtered.stats;
