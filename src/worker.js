@@ -355,7 +355,7 @@ async function handleGenerate(request, env) {
   const title = (b.title || '').toString().slice(0, 300);
   const price = (b.price || '').toString().slice(0, 60);
   const description = (b.description || '').toString().slice(0, 6000);
-  const category = (['product','hotel','cafe','restaurant'].includes(b.category) ? b.category : 'product');
+  const category = (['product','hotel','cafe','restaurant','bar'].includes(b.category) ? b.category : 'product');
   const provider = (b.provider === 'claude') ? 'claude' : 'gemini';
   const tone = String(b.tone || '').slice(0, 40); // 標準 | ミニマル寄り | モード寄り | 詩的 | ストリート | クラシック
   const freeform = String(b.freeform || '').slice(0, 400); // ユーザーの自由指示（例：「もっと〇〇に」）
@@ -499,17 +499,24 @@ JSONのみで出力する（他のテキスト・コードフェンスは含め�
 }
 
 function buildPlacePrompt({title, description, category, tone, freeform, avoidWords}) {
-  const catJa = category === 'hotel' ? 'ホテル' : category === 'cafe' ? 'カフェ' : 'レストラン';
+  const catJa = category === 'hotel' ? 'ホテル'
+              : category === 'cafe'  ? 'カフェ'
+              : category === 'bar'   ? 'バー'
+              : 'レストラン';
   const focus = category === 'hotel'
     ? '立地・建築や外観 → 客室・パブリックスペース → 料理・体験 → 訪れる価値'
     : category === 'cafe'
       ? '立地・雰囲気 → 内装・空間 → メニュー・過ごし方 → 訪れる価値'
-      : '立地・店構え → シェフ／料理ジャンル → 名物メニュー・体験 → 訪れる価値';
+      : category === 'bar'
+        ? '立地・店構え → 空間・カウンターの表情 → シグネチャーカクテル・酒類・音／灯り → 訪れる価値'
+        : '立地・店構え → シェフ／料理ジャンル → 名物メニュー・体験 → 訪れる価値';
   const headingHint = category === 'hotel'
     ? '例：「アルプスの山懐に抱かれた、静謐なるオーベルジュ」'
     : category === 'cafe'
       ? '例：「銀座の裏路地に佇む、大人のための和み珈琲店」'
-      : '例：「京町家で味わう、ミシュラン一つ星の革新的フレンチ」';
+      : category === 'bar'
+        ? '例：「西麻布の隠れ家で味わう、時代を超えたクラシックカクテル」'
+        : '例：「京町家で味わう、ミシュラン一つ星の革新的フレンチ」';
   return `あなたはリステア創業者・高下ひろあき氏のように、感度の高い旅・ライフスタイル情報誌の編集者である。
 以下の${catJa}情報から、掲載用テキストを3種類作成せよ。
 

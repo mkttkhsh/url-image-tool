@@ -308,7 +308,8 @@ function categoryFromRow(floor, itemName, pageUrl){
     const t = (itemName||'') + ' ' + (pageUrl||'');
     if(/ホテル|オーベルジュ|旅館|リゾート|hotel|ryokan|resort|inn/i.test(t)) return 'hotel';
     if(/カフェ|コーヒー|喫茶|cafe|coffee|kissa/i.test(t)) return 'cafe';
-    if(/レストラン|ダイニング|バー|restaurant|dining|bistro|izakaya|bar/i.test(t)) return 'restaurant';
+    if(/バー|カクテル|ラウンジ|ウィスキー|ウイスキー|スピークイージー|\bbar\b|cocktail|lounge|whisky|whiskey|speakeasy/i.test(t)) return 'bar';
+    if(/レストラン|ダイニング|restaurant|dining|bistro|izakaya|patisserie/i.test(t)) return 'restaurant';
     return 'restaurant';
   }
   return detectCategory(pageUrl);
@@ -336,18 +337,19 @@ function brandLabel(host){
   if(p.length>=3 && p[p.length-2].length<=3 && p[p.length-1].length<=3) return p[p.length-3];
   return p[p.length-2] || host;
 }
-// URLパスからカテゴリ推定（246select.com は /cafes/ /hotels/ /restaurants/ 等）
+// URLパスからカテゴリ推定（246select.com は /cafes/ /hotels/ /restaurants/ /bars/ 等）
 function detectCategory(pageUrl){
   if(!pageUrl) return 'product';
   try{
     const p = new URL(pageUrl).pathname.toLowerCase();
     if(/\/(hotels?|ryokan|inns?|resorts?|onsen)\b/.test(p)) return 'hotel';
     if(/\/(cafes?|coffee|kissa)\b/.test(p)) return 'cafe';
-    if(/\/(restaurants?|dining|bars?|bistros?|izakaya|patisseries?|kitchen)\b/.test(p)) return 'restaurant';
+    if(/\/(bars?|cocktail|lounge|whisky|whiskey|speakeasy)\b/.test(p)) return 'bar';
+    if(/\/(restaurants?|dining|bistros?|izakaya|patisseries?|kitchen)\b/.test(p)) return 'restaurant';
   }catch(e){}
   return 'product';
 }
-const CAT_LABEL = { product:'商品', hotel:'ホテル', cafe:'カフェ', restaurant:'レストラン' };
+const CAT_LABEL = { product:'商品', hotel:'ホテル', cafe:'カフェ', restaurant:'レストラン', bar:'バー' };
 function recordScrape(pageUrl, d, hadError){
   const host = hostOf(pageUrl); if(!host) return;
   const store = loadStats();
